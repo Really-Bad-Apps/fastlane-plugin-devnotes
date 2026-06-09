@@ -24,7 +24,7 @@ Add to your project's `fastlane/Pluginfile`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.1.0"
+    tag: "v0.1.1"
 ```
 
 Then:
@@ -81,7 +81,7 @@ Submits a release-notes generation job, polls until it completes, and writes the
 | `project_id`     | `DEVNOTES_PROJECT_ID`     | one of these two     | —                                         | Numeric DevNotes project id. Mutually exclusive with `project_name`. |
 | `release_name`   | `DEVNOTES_RELEASE_NAME`   | no                   | `last_git_tag`                            | E.g. `"2.3.0-beta1"`. Identifies the release to generate notes for. |
 | `from_tag`       | `DEVNOTES_FROM_TAG`       | no                   | auto-detected from production store       | Git tag to diff from. Leave unset to let DevNotes resolve. |
-| `output_path`    | `DEVNOTES_OUTPUT_PATH`    | no                   | `app/src/main/res/raw/rnotes.txt`         | Path is relative to the Fastfile's working directory. |
+| `output_path`    | `DEVNOTES_OUTPUT_PATH`    | no                   | `app/src/main/res/raw/rnotes.txt`         | Relative paths resolve against the **project root** (parent of `fastlane/`). Absolute paths are honoured as-is. |
 | `poll_interval`  | `DEVNOTES_POLL_INTERVAL`  | no                   | `10`                                      | Seconds between job-status polls. Must be > 0. |
 | `timeout`        | `DEVNOTES_TIMEOUT`        | no                   | `600`                                     | Total seconds to wait for generation. Must be > 0. |
 
@@ -158,7 +158,7 @@ Bump the `tag:` in your Pluginfile and run `bundle install`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.2.0"   # ← update tag
+    tag: "v0.1.2"   # ← update tag
 ```
 
 Releases are tagged in this repo; check the [tags](https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes/tags) page for what's available.

@@ -16,7 +16,7 @@ module Fastlane
         require_project_id_or_name(params)
 
         release_name = resolve_release_name(params)
-        output_path = File.expand_path(params[:output_path])
+        output_path = File.expand_path(params[:output_path], project_root)
         validate_res_raw_filename(output_path)
 
         client = Helper::DevnotesHelper.new(
@@ -98,6 +98,17 @@ module Fastlane
         return if params[:project_id]
         return if params[:project_name] && !params[:project_name].to_s.strip.empty?
         UI.user_error!("DevNotes: provide either project_id or project_name.")
+      end
+
+      # Resolve relative output_path against the project root (the parent of
+      # fastlane/), not Dir.pwd. Fastlane chdir's into the fastlane/ folder
+      # before running a lane, so File.expand_path(rel) would otherwise
+      # silently place files under fastlane/ instead of the AGP source tree.
+      # Falls back to Dir.pwd when no Fastfile is in play (bare CLI usage).
+      def self.project_root
+        fastlane_folder = FastlaneCore::FastlaneFolder.path if defined?(FastlaneCore::FastlaneFolder)
+        return Dir.pwd if fastlane_folder.nil?
+        File.expand_path("..", fastlane_folder)
       end
 
       def self.validate_res_raw_filename(output_path)
