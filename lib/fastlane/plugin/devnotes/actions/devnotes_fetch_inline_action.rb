@@ -13,7 +13,7 @@ module Fastlane
       RES_RAW_NAME_PATTERN = /\A[a-z0-9_.]+\z/.freeze
 
       def self.run(params)
-        require_project_id_or_name(params)
+        require_project_identifier(params)
 
         release_name = resolve_release_name(params)
         output_path = File.expand_path(params[:output_path], project_root)
@@ -43,6 +43,14 @@ module Fastlane
         write_utf8(output_path, mobile_notes)
         UI.success("DevNotes: wrote #{mobile_notes.bytesize} bytes to #{output_path}")
         output_path
+      rescue Helper::DevnotesHelper::AmbiguousSlugError => e
+        # Specific catch first (subclass of ApiError) so we can format the
+        # candidates list with copy-paste-ready project_slug values.
+        lines = ["DevNotes: #{e.message}", "Re-run with the explicit owner/slug form:"]
+        e.candidates.each do |c|
+          lines << "  project_slug: \"#{c['owner_username']}/#{c['slug']}\""
+        end
+        UI.user_error!(lines.join("\n"))
       rescue Helper::DevnotesHelper::ApiError => e
         # Single rescue at the top of run() so every helper call gets
         # uniform UI.user_error! translation, including project lookup
@@ -64,8 +72,25 @@ module Fastlane
         tag
       end
 
+      # Precedence: explicit project_id wins, then project_slug (the
+      # recommended path), then project_name (deprecated). Mutual exclusivity
+      # is enforced by ConfigItem's conflicting_options; this method only
+      # cares about which one is set.
       def self.resolve_project_id(client, params)
         return params[:project_id] if params[:project_id]
+
+        slug = params[:project_slug]
+        if slug && !slug.to_s.strip.empty?
+          project = if slug.include?("/")
+                      owner_username, slug_value = slug.split("/", 2)
+                      client.get_project_by_owner_and_slug(owner_username, slug_value)
+                    else
+                      client.get_project_by_slug(slug)
+                    end
+          id = project["id"]
+          UI.user_error!("API returned no id for project '#{slug}'") if id.nil?
+          return id
+        end
 
         project = client.get_project_by_name(params[:project_name])
         id = project["id"]
@@ -94,10 +119,14 @@ module Fastlane
 
       # "Both set" is enforced by ConfigItem's conflicting_options. This
       # only checks the "neither set" case, which Fastlane doesn't model.
-      def self.require_project_id_or_name(params)
+      def self.require_project_identifier(params)
         return if params[:project_id]
+        return if params[:project_slug] && !params[:project_slug].to_s.strip.empty?
         return if params[:project_name] && !params[:project_name].to_s.strip.empty?
-        UI.user_error!("DevNotes: provide either project_id or project_name.")
+        UI.user_error!(
+          "DevNotes: provide one of project_slug (recommended), project_id, " \
+          "or project_name (deprecated)."
+        )
       end
 
       # Resolve relative output_path against the project root (the parent of
@@ -164,19 +193,39 @@ module Fastlane
             type: String
           ),
           FastlaneCore::ConfigItem.new(
+            key: :project_slug,
+            env_name: "DEVNOTES_PROJECT_SLUG",
+            description: (
+              "Recommended. Project identifier in the GitHub-style " \
+              "'<owner_username>/<slug>' form (e.g. 'byteforge/podcast-guru-android'), " \
+              "or bare '<slug>' when unambiguous across your projects (mutually " \
+              "exclusive with project_name and project_id)"
+            ),
+            optional: true,
+            conflicting_options: [:project_name, :project_id],
+            type: String
+          ),
+          FastlaneCore::ConfigItem.new(
             key: :project_name,
             env_name: "DEVNOTES_PROJECT_NAME",
-            description: "DevNotes project name (mutually exclusive with project_id)",
+            description: (
+              "DEPRECATED — names are mutable display text and break builds " \
+              "on rename; prefer project_slug (mutually exclusive with " \
+              "project_slug and project_id)"
+            ),
             optional: true,
-            conflicting_options: [:project_id],
+            conflicting_options: [:project_slug, :project_id],
             type: String
           ),
           FastlaneCore::ConfigItem.new(
             key: :project_id,
             env_name: "DEVNOTES_PROJECT_ID",
-            description: "DevNotes project id (mutually exclusive with project_name)",
+            description: (
+              "DevNotes project id (mutually exclusive with project_slug " \
+              "and project_name)"
+            ),
             optional: true,
-            conflicting_options: [:project_name],
+            conflicting_options: [:project_slug, :project_name],
             type: Integer
           ),
           FastlaneCore::ConfigItem.new(

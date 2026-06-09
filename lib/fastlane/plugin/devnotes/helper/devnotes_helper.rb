@@ -23,6 +23,23 @@ module Fastlane
         end
       end
 
+      # Raised when GET /api/projects/by-slug/<slug> returns 409 because more
+      # than one accessible project shares the slug across different owners.
+      # `candidates` is an array of {"owner_username" => ..., "slug" => ...}
+      # hashes — re-call with the explicit owner/slug form to disambiguate.
+      #
+      # Subclasses ApiError so the existing `rescue ApiError` paths in the
+      # action keep catching it; the action narrows with `rescue AmbiguousSlugError`
+      # to format the candidate list specifically.
+      class AmbiguousSlugError < ApiError
+        attr_reader :candidates
+
+        def initialize(message, candidates:)
+          super(message, code: 409)
+          @candidates = candidates
+        end
+      end
+
       MAX_CONSECUTIVE_TRANSIENT_ERRORS = 6
       OPEN_TIMEOUT_SECONDS = 30
       READ_TIMEOUT_SECONDS = 60
@@ -47,6 +64,22 @@ module Fastlane
 
       def get_project_by_name(name)
         with_transient_retry { get("/api/projects/by-name/#{path_segment(name)}") }
+      end
+
+      # Resolve a project by bare slug; relies on the backend to 404 if no
+      # accessible project matches and to 409 (→ AmbiguousSlugError) if more
+      # than one accessible project shares the slug across owners.
+      def get_project_by_slug(slug)
+        with_transient_retry { get("/api/projects/by-slug/#{path_segment(slug)}") }
+      end
+
+      # Resolve a project by the explicit `(owner_username, slug)` identifier.
+      # Use this directly when both values are known up-front (e.g. from a
+      # Fastfile), or as the disambiguation step after AmbiguousSlugError.
+      def get_project_by_owner_and_slug(owner_username, slug)
+        with_transient_retry do
+          get("/api/projects/by-slug/#{path_segment(owner_username)}/#{path_segment(slug)}")
+        end
       end
 
       def submit_generation_job(project_id:, release_name:, from_tag: nil)
@@ -99,7 +132,34 @@ module Fastlane
         code = response.code.to_i
         return parse_body(response) if code >= 200 && code < 300
 
+        # Detect the slug-ambiguity 409: GET /api/projects/by-slug/<slug>
+        # returns a candidates array when more than one accessible project
+        # shares the slug. Lift it into a typed error so the action can
+        # format the choices without re-parsing the response body.
+        if code == 409
+          parsed = parse_error_json(response)
+          if parsed.is_a?(Hash) && parsed["candidates"].is_a?(Array)
+            raise AmbiguousSlugError.new(
+              parsed["message"] || "Ambiguous slug",
+              candidates: parsed["candidates"]
+            )
+          end
+        end
+
         raise ApiError.new("HTTP #{code}: #{extract_error_message(response)}", code: code)
+      end
+
+      # Best-effort JSON parse of an error response body; returns nil on
+      # parse failure or empty body. Used to peek at structured error
+      # payloads (e.g. the 409 candidates list) without raising — the
+      # generic ApiError path still surfaces unparsed bodies via
+      # extract_error_message.
+      def parse_error_json(response)
+        body = response.body.to_s
+        return nil if body.empty?
+        JSON.parse(body)
+      rescue JSON::ParserError
+        nil
       end
 
       def perform_request(req)
