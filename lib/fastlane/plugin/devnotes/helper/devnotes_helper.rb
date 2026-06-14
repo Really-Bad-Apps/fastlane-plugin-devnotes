@@ -66,6 +66,15 @@ module Fastlane
         with_transient_retry { get("/api/projects/by-name/#{path_segment(name)}") }
       end
 
+      # Resolve a project by numeric id. Used when the Fastfile passes
+      # project_id: directly — we still need the project's
+      # (created_by_username, slug) pair to call the new format-output
+      # endpoint, so the action fetches the project regardless of which
+      # identifier the caller supplied.
+      def get_project(project_id)
+        with_transient_retry { get("/api/projects/#{path_segment(project_id)}") }
+      end
+
       # Resolve a project by bare slug; relies on the backend to 404 if no
       # accessible project matches and to 409 (→ AmbiguousSlugError) if more
       # than one accessible project shares the slug across owners.
@@ -79,6 +88,23 @@ module Fastlane
       def get_project_by_owner_and_slug(owner_username, slug)
         with_transient_retry do
           get("/api/projects/by-slug/#{path_segment(owner_username)}/#{path_segment(slug)}")
+        end
+      end
+
+      # Lazy GET (or generate-and-cache) a format's output for a release.
+      # Backend cache key: (format_id, commit_hash, model, prompt_hash) —
+      # so identical builds against the same tag short-circuit the LLM
+      # and return cached bytes. Editing the format's prompt produces a
+      # fresh prompt_hash → cache miss → regeneration on the next call.
+      #
+      # Response shape: { format_slug, content, mime_type, model,
+      #   prompt_hash, generated_at } — `content` is the bytes to bundle.
+      def get_format_output(owner_username:, project_slug:, release_id:, format_slug:)
+        with_transient_retry do
+          get(
+            "/api/projects/#{path_segment(owner_username)}/#{path_segment(project_slug)}" \
+            "/releases/#{path_segment(release_id)}/formats/#{path_segment(format_slug)}"
+          )
         end
       end
 

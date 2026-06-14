@@ -19,6 +19,9 @@ module Fastlane
         output_path = File.expand_path(params[:output_path], project_root)
         validate_res_raw_filename(output_path)
 
+        format_slug = params[:format_slug].to_s.strip
+        UI.user_error!("format_slug must not be empty") if format_slug.empty?
+
         client = Helper::DevnotesHelper.new(
           api_url: params[:api_url],
           api_key: params[:api_key],
@@ -26,22 +29,55 @@ module Fastlane
           timeout: params[:timeout]
         )
 
-        project_id = resolve_project_id(client, params)
-        UI.message("DevNotes: project_id=#{project_id} release_name=#{release_name}")
+        project = resolve_project(client, params)
+        project_id = project["id"]
+        owner_username = project["created_by_username"]
+        project_slug_value = project["slug"]
+        if owner_username.nil? || project_slug_value.nil?
+          # Backend hasn't backfilled (owner_username, slug) on this row yet
+          # — without those, the lazy format endpoint isn't addressable.
+          UI.user_error!(
+            "DevNotes project #{project_id} has no (created_by_username, slug) pair " \
+            "— ask your DevNotes admin to backfill it before re-running this lane."
+          )
+        end
+        UI.message(
+          "DevNotes: project=#{owner_username}/#{project_slug_value} (id=#{project_id}) " \
+          "release_name=#{release_name} format_slug=#{format_slug}"
+        )
 
         job = submit_and_wait(client, project_id, release_name, params[:from_tag])
 
-        result_data = job["result_data"] || {}
-        mobile_notes = result_data["mobile_notes"]
-        unless mobile_notes.is_a?(String) && !mobile_notes.empty?
+        release_id = (job["result_data"] || {})["release_id"]
+        unless release_id.is_a?(Integer) && release_id.positive?
           UI.user_error!(
-            "Job #{job['id']} completed but result_data.mobile_notes is empty or " \
-            "not a string (got #{mobile_notes.class})."
+            "Job #{job['id']} completed but result_data.release_id is missing or invalid " \
+            "(got #{release_id.inspect}). This usually means the DevNotes backend is older " \
+            "than v89 (the formats redesign); upgrade the backend and retry."
           )
         end
 
-        write_utf8(output_path, mobile_notes)
-        UI.success("DevNotes: wrote #{mobile_notes.bytesize} bytes to #{output_path}")
+        UI.message("DevNotes: fetching format '#{format_slug}' for release #{release_id}...")
+        output = client.get_format_output(
+          owner_username: owner_username,
+          project_slug: project_slug_value,
+          release_id: release_id,
+          format_slug: format_slug
+        )
+
+        content = output["content"]
+        unless content.is_a?(String) && !content.empty?
+          UI.user_error!(
+            "Format '#{format_slug}' returned empty content (got #{content.class}). " \
+            "Check the format's prompt in the DevNotes UI."
+          )
+        end
+
+        write_utf8(output_path, content)
+        mime_type = output["mime_type"] || "(unknown)"
+        UI.success(
+          "DevNotes: wrote #{content.bytesize} bytes (#{mime_type}) to #{output_path}"
+        )
         output_path
       rescue Helper::DevnotesHelper::AmbiguousSlugError => e
         # Specific catch first (subclass of ApiError) so we can format the
@@ -54,7 +90,9 @@ module Fastlane
       rescue Helper::DevnotesHelper::ApiError => e
         # Single rescue at the top of run() so every helper call gets
         # uniform UI.user_error! translation, including project lookup
-        # (which used to escape as a raw stack trace on a 404).
+        # (which used to escape as a raw stack trace on a 404) and the
+        # new lazy format-output endpoint (422 on prompt template errors,
+        # 503 on transient LLM failures retried up to MAX_CONSECUTIVE_TRANSIENT_ERRORS).
         UI.user_error!("DevNotes API error: #{e.message}")
       end
 
@@ -76,26 +114,24 @@ module Fastlane
       # recommended path), then project_name (deprecated). Mutual exclusivity
       # is enforced by ConfigItem's conflicting_options; this method only
       # cares about which one is set.
-      def self.resolve_project_id(client, params)
-        return params[:project_id] if params[:project_id]
+      #
+      # Returns the FULL project hash from the API (id, slug,
+      # created_by_username, etc.) — the action needs the owner+slug pair
+      # to address the lazy format-output endpoint, so every path resolves
+      # to a project hash including those fields.
+      def self.resolve_project(client, params)
+        return client.get_project(params[:project_id]) if params[:project_id]
 
         slug = params[:project_slug]
         if slug && !slug.to_s.strip.empty?
-          project = if slug.include?("/")
-                      owner_username, slug_value = slug.split("/", 2)
-                      client.get_project_by_owner_and_slug(owner_username, slug_value)
-                    else
-                      client.get_project_by_slug(slug)
-                    end
-          id = project["id"]
-          UI.user_error!("API returned no id for project '#{slug}'") if id.nil?
-          return id
+          if slug.include?("/")
+            owner_username, slug_value = slug.split("/", 2)
+            return client.get_project_by_owner_and_slug(owner_username, slug_value)
+          end
+          return client.get_project_by_slug(slug)
         end
 
-        project = client.get_project_by_name(params[:project_name])
-        id = project["id"]
-        UI.user_error!("API returned no id for project '#{params[:project_name]}'") if id.nil?
-        id
+        client.get_project_by_name(params[:project_name])
       end
 
       def self.submit_and_wait(client, project_id, release_name, from_tag)
@@ -158,18 +194,26 @@ module Fastlane
       end
 
       def self.description
-        "Generate and fetch DevNotes mobile release notes; write the HTML to a path in the Android source tree."
+        "Generate and fetch a DevNotes release-notes format; write the bytes to a path in the Android source tree."
       end
 
       def self.details
         <<~DETAILS
-          Submits a release-notes generation job to the DevNotes API, polls until it
-          completes, and writes the mobile HTML variant from result_data.mobile_notes
-          to the given path. Intended to run before `gradle assembleRelease` so the
-          notes are bundled as an Android resource (e.g. app/src/main/res/raw/rnotes.txt).
+          Submits a release-notes generation job to the DevNotes API, polls
+          until it completes, then lazily fetches the chosen format's output
+          for that release and writes it to the given path. Intended to run
+          before `gradle assembleRelease` so the notes are bundled as an
+          Android resource (e.g. app/src/main/res/raw/rnotes.txt).
 
-          The DevNotes backend caches release notes by (project_id, commit_hash, model)
-          — rebuilding the same tag short-circuits the LLM and returns instantly.
+          Pick which output to bundle with `format_slug:` — defaults to
+          'mobile-html' (the standard Android notes format). Other formats
+          (X posts, WordPress blog, Play Store notes, etc.) are user-defined
+          per project in the DevNotes web UI.
+
+          The DevNotes backend caches each format's output by (format_id,
+          commit_hash, model, prompt_hash). Rebuilding the same tag with the
+          same prompt short-circuits the LLM and returns instantly; editing
+          the prompt in the UI produces a fresh cache row on the next build.
 
           Auth: Bearer token in the Authorization header (DEVNOTES_API_KEY).
         DETAILS
@@ -227,6 +271,19 @@ module Fastlane
             optional: true,
             conflicting_options: [:project_slug, :project_name],
             type: Integer
+          ),
+          FastlaneCore::ConfigItem.new(
+            key: :format_slug,
+            env_name: "DEVNOTES_FORMAT_SLUG",
+            description: (
+              "Which DevNotes format to bundle. Defaults to 'mobile-html' " \
+              "(the standard Android notes format). Define additional " \
+              "formats — X posts, WordPress blog, Play Store notes, etc. — " \
+              "in the DevNotes web UI and reference them here"
+            ),
+            optional: true,
+            default_value: "mobile-html",
+            type: String
           ),
           FastlaneCore::ConfigItem.new(
             key: :release_name,
