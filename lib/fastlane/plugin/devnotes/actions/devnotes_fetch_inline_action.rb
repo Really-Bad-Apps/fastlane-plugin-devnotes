@@ -35,7 +35,7 @@ module Fastlane
         project_slug_value = project["slug"]
         if owner_username.nil? || project_slug_value.nil?
           # Backend hasn't backfilled (owner_username, slug) on this row yet
-          # — without those, the lazy format endpoint isn't addressable.
+          # — without those, every project-scoped endpoint is unreachable.
           UI.user_error!(
             "DevNotes project #{project_id} has no (created_by_username, slug) pair " \
             "— ask your DevNotes admin to backfill it before re-running this lane."
@@ -46,7 +46,7 @@ module Fastlane
           "release_name=#{release_name} format_slug=#{format_slug}"
         )
 
-        job = submit_and_wait(client, project_id, release_name, params[:from_tag])
+        job = submit_and_wait(client, owner_username, project_slug_value, release_name, params[:from_tag])
 
         release_id = (job["result_data"] || {})["release_id"]
         unless release_id.is_a?(Integer) && release_id.positive?
@@ -110,18 +110,16 @@ module Fastlane
         tag
       end
 
-      # Precedence: explicit project_id wins, then project_slug (the
-      # recommended path), then project_name (deprecated). Mutual exclusivity
-      # is enforced by ConfigItem's conflicting_options; this method only
-      # cares about which one is set.
+      # Precedence: project_slug (the recommended path) wins, then
+      # project_name (deprecated). Mutual exclusivity is enforced by
+      # ConfigItem's conflicting_options; this method only cares about
+      # which one is set.
       #
       # Returns the FULL project hash from the API (id, slug,
       # created_by_username, etc.) — the action needs the owner+slug pair
-      # to address the lazy format-output endpoint, so every path resolves
+      # to address every project-scoped endpoint, so every path resolves
       # to a project hash including those fields.
       def self.resolve_project(client, params)
-        return client.get_project(params[:project_id]) if params[:project_id]
-
         slug = params[:project_slug]
         if slug && !slug.to_s.strip.empty?
           if slug.include?("/")
@@ -134,10 +132,11 @@ module Fastlane
         client.get_project_by_name(params[:project_name])
       end
 
-      def self.submit_and_wait(client, project_id, release_name, from_tag)
+      def self.submit_and_wait(client, owner_username, project_slug, release_name, from_tag)
         UI.message("DevNotes: submitting generation job...")
         submission = client.submit_generation_job(
-          project_id: project_id,
+          owner_username: owner_username,
+          project_slug: project_slug,
           release_name: release_name,
           from_tag: from_tag
         )
@@ -156,12 +155,10 @@ module Fastlane
       # "Both set" is enforced by ConfigItem's conflicting_options. This
       # only checks the "neither set" case, which Fastlane doesn't model.
       def self.require_project_identifier(params)
-        return if params[:project_id]
         return if params[:project_slug] && !params[:project_slug].to_s.strip.empty?
         return if params[:project_name] && !params[:project_name].to_s.strip.empty?
         UI.user_error!(
-          "DevNotes: provide one of project_slug (recommended), project_id, " \
-          "or project_name (deprecated)."
+          "DevNotes: provide project_slug (recommended) or project_name (deprecated)."
         )
       end
 
@@ -243,10 +240,10 @@ module Fastlane
               "Recommended. Project identifier in the GitHub-style " \
               "'<owner_username>/<slug>' form (e.g. 'byteforge/podcast-guru-android'), " \
               "or bare '<slug>' when unambiguous across your projects (mutually " \
-              "exclusive with project_name and project_id)"
+              "exclusive with project_name)"
             ),
             optional: true,
-            conflicting_options: [:project_name, :project_id],
+            conflicting_options: [:project_name],
             type: String
           ),
           FastlaneCore::ConfigItem.new(
@@ -255,22 +252,11 @@ module Fastlane
             description: (
               "DEPRECATED — names are mutable display text and break builds " \
               "on rename; prefer project_slug (mutually exclusive with " \
-              "project_slug and project_id)"
+              "project_slug)"
             ),
             optional: true,
-            conflicting_options: [:project_slug, :project_id],
+            conflicting_options: [:project_slug],
             type: String
-          ),
-          FastlaneCore::ConfigItem.new(
-            key: :project_id,
-            env_name: "DEVNOTES_PROJECT_ID",
-            description: (
-              "DevNotes project id (mutually exclusive with project_slug " \
-              "and project_name)"
-            ),
-            optional: true,
-            conflicting_options: [:project_slug, :project_name],
-            type: Integer
           ),
           FastlaneCore::ConfigItem.new(
             key: :format_slug,

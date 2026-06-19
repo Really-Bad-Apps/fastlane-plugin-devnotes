@@ -24,7 +24,7 @@ Add to your project's `fastlane/Pluginfile`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.3.0"
+    tag: "v0.4.0"
 ```
 
 Then:
@@ -35,7 +35,9 @@ bundle install
 
 > Pin a specific `tag:` for production builds. `branch: "main"` works for testing but is a rolling reference.
 
-> ⚠️ **Upgrading from v0.2.x?** v0.3.0 is the cutover to DevNotes backend v89's lazy format-output endpoint. The plugin no longer reads `result_data.mobile_notes` from the job (it's been removed server-side); instead it fetches the chosen format via a follow-up call. v0.2.x Fastfiles keep working unchanged in the default case (no `format_slug:` arg ⇒ `"mobile-html"`), but they will **stop working against backend v89+** because `result_data.mobile_notes` is gone — bump the plugin pin.
+> ⚠️ **Upgrading from v0.3.x?** v0.4.0 is the cutover to DevNotes backend v91's slug-canonical project routes (Phase 2 of the UUID PK migration). The `project_id:` option is gone — pass `project_slug:` instead. Fastfiles that already used `project_slug:` (the recommended path since v0.3.0) work unchanged. Fastfiles using `project_id: 1` will **stop working against backend v91+** because the `<int:project_id>` routes were dropped — switch to `project_slug: "owner/slug"`.
+
+> ⚠️ **Upgrading from v0.2.x?** v0.3.0 was the cutover to DevNotes backend v89's lazy format-output endpoint. The plugin no longer reads `result_data.mobile_notes` from the job (it's been removed server-side); instead it fetches the chosen format via a follow-up call. v0.2.x Fastfiles keep working unchanged in the default case (no `format_slug:` arg ⇒ `"mobile-html"`), but they will **stop working against backend v89+** because `result_data.mobile_notes` is gone — bump the plugin pin.
 
 ---
 
@@ -83,9 +85,8 @@ Submits a release-notes generation job, polls until it completes, then lazily fe
 | ---------------- | ------------------------- | -------------------- | ----------------------------------------- | ----- |
 | `api_url`        | `DEVNOTES_API_URL`        | no                   | `https://api.devnotes.ai`                 | Override for staging or self-hosted DevNotes. |
 | `api_key`        | `DEVNOTES_API_KEY`        | **yes**              | —                                         | Bearer token. Marked sensitive — set via env var, never check in. |
-| `project_slug`   | `DEVNOTES_PROJECT_SLUG`   | one of these three   | —                                         | **Recommended.** GitHub-style `"<owner>/<slug>"` or bare `"<slug>"` (auto-resolved when unambiguous). |
-| `project_id`     | `DEVNOTES_PROJECT_ID`     | one of these three   | —                                         | Numeric DevNotes project id — stable but opaque. |
-| `project_name`   | `DEVNOTES_PROJECT_NAME`   | one of these three   | —                                         | **Deprecated.** Project display name — mutable, will break the build on rename. Backend sunsets the `/by-name/` endpoint 2026-09-07. |
+| `project_slug`   | `DEVNOTES_PROJECT_SLUG`   | one of these two     | —                                         | **Recommended.** GitHub-style `"<owner>/<slug>"` or bare `"<slug>"` (auto-resolved when unambiguous). |
+| `project_name`   | `DEVNOTES_PROJECT_NAME`   | one of these two     | —                                         | **Deprecated.** Project display name — mutable, will break the build on rename. Backend sunsets the `/by-name/` endpoint 2026-09-07. |
 | `format_slug`    | `DEVNOTES_FORMAT_SLUG`    | no                   | `"mobile-html"`                           | Which DevNotes format to bundle. The default ships the standard Android "What's New" HTML. Define additional formats (X posts, WordPress, Play Store notes, …) per-project in the DevNotes web UI. |
 | `release_name`   | `DEVNOTES_RELEASE_NAME`   | no                   | `last_git_tag`                            | E.g. `"2.3.0-beta1"`. Identifies the release to generate notes for. |
 | `from_tag`       | `DEVNOTES_FROM_TAG`       | no                   | auto-detected from production store       | Git tag to diff from. Leave unset to let DevNotes resolve. |
@@ -101,7 +102,7 @@ Submits a release-notes generation job, polls until it completes, then lazily fe
 
 ### Flow
 
-1. Resolves the DevNotes project by `project_slug` (one lookup; bare slug or `owner/slug`), `project_id` (still one lookup — v0.3.0 needs the project's `(owner_username, slug)` pair for the format endpoint, regardless of which identifier you passed), or `project_name` (deprecated, one lookup).
+1. Resolves the DevNotes project by `project_slug` (one lookup; bare slug or `owner/slug`) or `project_name` (deprecated, one lookup).
 2. Submits a generation job.
 3. Polls the job status every `poll_interval` seconds, up to `timeout`, on a single keep-alive HTTP connection.
 4. On completion, calls `GET /api/projects/<owner>/<slug>/releases/<release_id>/formats/<format_slug>` to lazy-fetch the chosen format's output (cache-hit usually returns in milliseconds).
@@ -162,7 +163,6 @@ In your CI secret store, set:
 ```
 DEVNOTES_API_KEY         # the bearer token (required)
 DEVNOTES_PROJECT_SLUG    # recommended; "<owner>/<slug>" or bare "<slug>"
-# DEVNOTES_PROJECT_ID    # alternative; numeric, stable but opaque
 # DEVNOTES_PROJECT_NAME  # deprecated; mutable display name
 # DEVNOTES_FORMAT_SLUG   # optional; defaults to "mobile-html"
 ```
@@ -186,7 +186,7 @@ Bump the `tag:` in your Pluginfile and run `bundle install`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.3.1"   # ← update tag
+    tag: "v0.4.0"   # ← update tag
 ```
 
 Releases are tagged in this repo; check the [tags](https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes/tags) page for what's available.

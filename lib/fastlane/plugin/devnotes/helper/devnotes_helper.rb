@@ -66,15 +66,6 @@ module Fastlane
         with_transient_retry { get("/api/projects/by-name/#{path_segment(name)}") }
       end
 
-      # Resolve a project by numeric id. Used when the Fastfile passes
-      # project_id: directly — we still need the project's
-      # (created_by_username, slug) pair to call the new format-output
-      # endpoint, so the action fetches the project regardless of which
-      # identifier the caller supplied.
-      def get_project(project_id)
-        with_transient_retry { get("/api/projects/#{path_segment(project_id)}") }
-      end
-
       # Resolve a project by bare slug; relies on the backend to 404 if no
       # accessible project matches and to 409 (→ AmbiguousSlugError) if more
       # than one accessible project shares the slug across owners.
@@ -82,12 +73,13 @@ module Fastlane
         with_transient_retry { get("/api/projects/by-slug/#{path_segment(slug)}") }
       end
 
-      # Resolve a project by the explicit `(owner_username, slug)` identifier.
-      # Use this directly when both values are known up-front (e.g. from a
-      # Fastfile), or as the disambiguation step after AmbiguousSlugError.
+      # Resolve a project by the explicit `(owner_username, slug)` pair —
+      # the canonical project resource post Phase 2. Use this directly when
+      # both values are known up-front (e.g. from a Fastfile), or as the
+      # disambiguation step after AmbiguousSlugError.
       def get_project_by_owner_and_slug(owner_username, slug)
         with_transient_retry do
-          get("/api/projects/by-slug/#{path_segment(owner_username)}/#{path_segment(slug)}")
+          get("/api/projects/#{path_segment(owner_username)}/#{path_segment(slug)}")
         end
       end
 
@@ -108,12 +100,18 @@ module Fastlane
         end
       end
 
-      def submit_generation_job(project_id:, release_name:, from_tag: nil)
+      def submit_generation_job(owner_username:, project_slug:, release_name:, from_tag: nil)
         body = { release_name: release_name }
         # Empty string is truthy in Ruby — guard explicitly so an empty
         # DEVNOTES_FROM_TAG env var doesn't override the backend's auto-detect.
         body[:from_tag] = from_tag if from_tag && !from_tag.to_s.strip.empty?
-        with_transient_retry { post("/api/projects/#{project_id}/generate-release-notes", body) }
+        with_transient_retry do
+          post(
+            "/api/projects/#{path_segment(owner_username)}/#{path_segment(project_slug)}" \
+            "/generate-release-notes",
+            body
+          )
+        end
       end
 
       # Poll /api/jobs/<job_id> until status is terminal (completed | failed)
