@@ -57,12 +57,21 @@ module Fastlane
           )
         end
 
-        UI.message("DevNotes: fetching format '#{format_slug}' for release #{release_id}...")
+        locale = params[:locale].to_s.strip
+        locale = nil if locale.empty?
+        if locale
+          UI.message(
+            "DevNotes: fetching format '#{format_slug}' for release #{release_id} (locale=#{locale})..."
+          )
+        else
+          UI.message("DevNotes: fetching format '#{format_slug}' for release #{release_id}...")
+        end
         output = client.get_format_output(
           owner_username: owner_username,
           project_slug: project_slug_value,
           release_id: release_id,
-          format_slug: format_slug
+          format_slug: format_slug,
+          locale: locale
         )
 
         content = output["content"]
@@ -75,10 +84,27 @@ module Fastlane
 
         write_utf8(output_path, content)
         mime_type = output["mime_type"] || "(unknown)"
-        UI.success(
-          "DevNotes: wrote #{content.bytesize} bytes (#{mime_type}) to #{output_path}"
-        )
+        if output["translated"]
+          UI.success(
+            "DevNotes: wrote #{content.bytesize} bytes (#{mime_type}, " \
+            "translated to #{output['locale']} in #{output['translation_attempts']} attempts) " \
+            "to #{output_path}"
+          )
+        else
+          UI.success(
+            "DevNotes: wrote #{content.bytesize} bytes (#{mime_type}) to #{output_path}"
+          )
+        end
         output_path
+      rescue Helper::DevnotesHelper::TranslationFitError => e
+        # Most specific catch (subclass of ApiError) so the build operator
+        # sees exactly why the translation failed and what to adjust.
+        UI.user_error!(
+          "DevNotes: format '#{format_slug}' translation to #{e.locale} could not fit " \
+          "max_char_length=#{e.max_char_length} (best attempt was #{e.best_length} chars " \
+          "after #{e.attempts} tries). Either raise max_char_length on the format " \
+          "in the DevNotes UI, or pick a less verbose source content for this release."
+        )
       rescue Helper::DevnotesHelper::AmbiguousSlugError => e
         # Specific catch first (subclass of ApiError) so we can format the
         # candidates list with copy-paste-ready project_slug values.
@@ -269,6 +295,22 @@ module Fastlane
             ),
             optional: true,
             default_value: "mobile-html",
+            type: String
+          ),
+          FastlaneCore::ConfigItem.new(
+            key: :locale,
+            env_name: "DEVNOTES_LOCALE",
+            description: (
+              "Optional BCP 47 tag (e.g. 'es-MX', 'ru-RU') requesting a " \
+              "translated format output. Omitted or 'en-*' returns the " \
+              "source English. When the format has max_char_length set " \
+              "and the translator can't fit, the action fails with a " \
+              "clear error showing attempts/best_length/max_char_length. " \
+              "Multi-locale builds: invoke the action once per locale with " \
+              "matching output_path values (e.g. /res/raw-ru/rnotes.txt for " \
+              "ru-RU); the plugin does NOT auto-embed locale in output_path"
+            ),
+            optional: true,
             type: String
           ),
           FastlaneCore::ConfigItem.new(

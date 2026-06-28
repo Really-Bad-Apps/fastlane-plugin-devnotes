@@ -40,6 +40,28 @@ module Fastlane
         end
       end
 
+      # Raised when GET ...?locale=<non-English> returns 422 because the
+      # translator couldn't fit the content within the format's
+      # max_char_length after the retry budget (backend default 3 attempts).
+      #
+      # `best_length` is the shortest attempt — useful for deciding
+      # whether to raise the format's limit or pick a less verbose source.
+      #
+      # Subclasses ApiError so the existing `rescue ApiError` paths keep
+      # catching it; the action narrows with `rescue TranslationFitError`
+      # to format the operator-facing details.
+      class TranslationFitError < ApiError
+        attr_reader :attempts, :best_length, :max_char_length, :locale
+
+        def initialize(message, attempts:, best_length:, max_char_length:, locale:)
+          super(message, code: 422)
+          @attempts = attempts
+          @best_length = best_length
+          @max_char_length = max_char_length
+          @locale = locale
+        end
+      end
+
       MAX_CONSECUTIVE_TRANSIENT_ERRORS = 6
       OPEN_TIMEOUT_SECONDS = 30
       READ_TIMEOUT_SECONDS = 60
@@ -89,15 +111,19 @@ module Fastlane
       # and return cached bytes. Editing the format's prompt produces a
       # fresh prompt_hash → cache miss → regeneration on the next call.
       #
+      # Pass `locale:` (BCP 47, e.g. "es-MX", "ru-RU") to request a
+      # translation. Omitted or "en-*" returns the source English content
+      # with translated=false. A malformed locale yields a 400; overshoot
+      # of the format's max_char_length surfaces as TranslationFitError.
+      #
       # Response shape: { format_slug, content, mime_type, model,
-      #   prompt_hash, generated_at } — `content` is the bytes to bundle.
-      def get_format_output(owner_username:, project_slug:, release_id:, format_slug:)
-        with_transient_retry do
-          get(
-            "/api/projects/#{path_segment(owner_username)}/#{path_segment(project_slug)}" \
-            "/releases/#{path_segment(release_id)}/formats/#{path_segment(format_slug)}"
-          )
-        end
+      #   prompt_hash, generated_at, locale, translated, max_char_length,
+      #   translation_attempts } — `content` is the bytes to bundle.
+      def get_format_output(owner_username:, project_slug:, release_id:, format_slug:, locale: nil)
+        path = "/api/projects/#{path_segment(owner_username)}/#{path_segment(project_slug)}" \
+               "/releases/#{path_segment(release_id)}/formats/#{path_segment(format_slug)}"
+        path += "?locale=#{path_segment(locale)}" if locale && !locale.to_s.strip.empty?
+        with_transient_retry { get(path) }
       end
 
       def submit_generation_job(owner_username:, project_slug:, release_name:, from_tag: nil)
@@ -166,6 +192,28 @@ module Fastlane
             raise AmbiguousSlugError.new(
               parsed["message"] || "Ambiguous slug",
               candidates: parsed["candidates"]
+            )
+          end
+        end
+
+        # Detect the translator-fit 422: the format-output GET returns
+        # attempts/best_length/max_char_length/locale alongside the standard
+        # fields when the translator can't fit max_char_length after the
+        # retry budget. Other 422s (e.g. unknown prompt-template variable)
+        # don't carry these fields and fall through to generic ApiError.
+        if code == 422
+          parsed = parse_error_json(response)
+          if parsed.is_a?(Hash) &&
+             parsed["attempts"].is_a?(Integer) &&
+             parsed["best_length"].is_a?(Integer) &&
+             parsed["max_char_length"].is_a?(Integer) &&
+             parsed["locale"].is_a?(String)
+            raise TranslationFitError.new(
+              parsed["message"] || "Translation cannot fit max_char_length",
+              attempts: parsed["attempts"],
+              best_length: parsed["best_length"],
+              max_char_length: parsed["max_char_length"],
+              locale: parsed["locale"]
             )
           end
         end
