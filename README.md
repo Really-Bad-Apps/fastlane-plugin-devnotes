@@ -24,7 +24,7 @@ Add to your project's `fastlane/Pluginfile`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.4.0"
+    tag: "v0.5.0"
 ```
 
 Then:
@@ -35,7 +35,9 @@ bundle install
 
 > Pin a specific `tag:` for production builds. `branch: "main"` works for testing but is a rolling reference.
 
-> ⚠️ **Upgrading from v0.3.x?** v0.4.0 is the cutover to DevNotes backend v91's slug-canonical project routes (Phase 2 of the UUID PK migration). The `project_id:` option is gone — pass `project_slug:` instead. Fastfiles that already used `project_slug:` (the recommended path since v0.3.0) work unchanged. Fastfiles using `project_id: 1` will **stop working against backend v91+** because the `<int:project_id>` routes were dropped — switch to `project_slug: "owner/slug"`.
+> ✨ **What's new in v0.5.0?** Optional `locale:` action option (env `DEVNOTES_LOCALE`) — pass a BCP 47 tag like `"es-MX"` or `"ru-RU"` to bundle a translated format output. Backwards-compatible: existing Fastfiles work unchanged (no `locale:` ⇒ source English). See [Translations](#translations) below.
+
+> ⚠️ **Upgrading from v0.3.x?** v0.4.0 was the cutover to DevNotes backend v91's slug-canonical project routes (Phase 2 of the UUID PK migration). The `project_id:` option is gone — pass `project_slug:` instead. Fastfiles that already used `project_slug:` (the recommended path since v0.3.0) work unchanged. Fastfiles using `project_id: 1` will **stop working against backend v91+** because the `<int:project_id>` routes were dropped — switch to `project_slug: "owner/slug"`.
 
 > ⚠️ **Upgrading from v0.2.x?** v0.3.0 was the cutover to DevNotes backend v89's lazy format-output endpoint. The plugin no longer reads `result_data.mobile_notes` from the job (it's been removed server-side); instead it fetches the chosen format via a follow-up call. v0.2.x Fastfiles keep working unchanged in the default case (no `format_slug:` arg ⇒ `"mobile-html"`), but they will **stop working against backend v89+** because `result_data.mobile_notes` is gone — bump the plugin pin.
 
@@ -88,6 +90,7 @@ Submits a release-notes generation job, polls until it completes, then lazily fe
 | `project_slug`   | `DEVNOTES_PROJECT_SLUG`   | one of these two     | —                                         | **Recommended.** GitHub-style `"<owner>/<slug>"` or bare `"<slug>"` (auto-resolved when unambiguous). |
 | `project_name`   | `DEVNOTES_PROJECT_NAME`   | one of these two     | —                                         | **Deprecated.** Project display name — mutable, will break the build on rename. Backend sunsets the `/by-name/` endpoint 2026-09-07. |
 | `format_slug`    | `DEVNOTES_FORMAT_SLUG`    | no                   | `"mobile-html"`                           | Which DevNotes format to bundle. The default ships the standard Android "What's New" HTML. Define additional formats (X posts, WordPress, Play Store notes, …) per-project in the DevNotes web UI. |
+| `locale`         | `DEVNOTES_LOCALE`         | no                   | —                                         | Optional BCP 47 tag (e.g. `"es-MX"`, `"ru-RU"`) requesting a translated format output. Omitted or `"en-*"` returns source English. See [Translations](#translations) for multi-locale build patterns and the `max_char_length` failure mode. |
 | `release_name`   | `DEVNOTES_RELEASE_NAME`   | no                   | `last_git_tag`                            | E.g. `"2.3.0-beta1"`. Identifies the release to generate notes for. |
 | `from_tag`       | `DEVNOTES_FROM_TAG`       | no                   | auto-detected from production store       | Git tag to diff from. Leave unset to let DevNotes resolve. |
 | `output_path`    | `DEVNOTES_OUTPUT_PATH`    | no                   | `app/src/main/res/raw/rnotes.txt`         | Relative paths resolve against the **project root** (parent of `fastlane/`). Absolute paths are honoured as-is. |
@@ -128,10 +131,65 @@ The action calls `UI.user_error!` and aborts the lane on:
 | Bare slug matches >1 project (`409`)     | `DevNotes: Ambiguous slug …` followed by the candidate list as `project_slug: "<owner>/<slug>"` lines |
 | Request validation failed (`422`)        | `DevNotes API error: HTTP 422: json.<field>: …`     |
 | Prompt template references an unknown variable (`422`) | `DevNotes API error: HTTP 422: Prompt template references unknown variable: …` — fix the format's prompt in the DevNotes UI. |
+| Malformed `locale` (`400`)               | `DevNotes API error: HTTP 400: Invalid locale: expected BCP 47 tag like 'es-MX', got 'es'` — locale must be language+region (e.g. `"es-MX"`, not bare `"es"`). |
+| Translator can't fit `max_char_length` (`422`) | `DevNotes: format '<slug>' translation to <locale> could not fit max_char_length=N …` — see [Translations](#translations) for the full message. |
 | Transient LLM failure during format generation (`503`) | Retried up to 6 times; if persistent, `DevNotes API error: Gave up after 6 consecutive …` |
 | DevNotes job marked `failed`             | `DevNotes job N failed: <error_message>`            |
 | `timeout` elapsed before completion      | `DevNotes API error: Timed out after Ns waiting for job N` |
 | Persistent 5xx / network failures        | `DevNotes API error: Gave up after 6 consecutive …` |
+
+### Translations
+
+Pass `locale:` (BCP 47, e.g. `"es-MX"` or `"ru-RU"`) to bundle a translated format output. Omitted or any `"en-*"` value returns source English with no extra backend work.
+
+```ruby
+devnotes_fetch_inline(
+  project_slug: "byteforge/podcast-guru-android",
+  format_slug:  "mobile-html",
+  locale:       "ru-RU",
+  output_path:  "app/src/main/res/raw-ru/rnotes.txt",   # see "Multi-locale builds" below
+)
+```
+
+When the backend translates, the action's success line includes the locale and attempts count:
+
+```
+DevNotes: wrote 1234 bytes (text/html, translated to ru-RU in 2 attempts) to /…/raw-ru/rnotes.txt
+```
+
+#### Multi-locale builds
+
+The plugin does **not** auto-embed the locale into `output_path` — Android apps read fixed resource paths, so changing the filename per locale would break the consumer side. Instead, invoke the action once per locale with matching Android resource qualifier directories:
+
+```ruby
+[
+  { locale: nil,     path: "app/src/main/res/raw/rnotes.txt"     },  # default (en)
+  { locale: "ru-RU", path: "app/src/main/res/raw-ru/rnotes.txt"  },
+  { locale: "es-MX", path: "app/src/main/res/raw-es/rnotes.txt"  },
+].each do |c|
+  devnotes_fetch_inline(
+    project_slug: "byteforge/podcast-guru-android",
+    format_slug:  "mobile-html",
+    locale:       c[:locale],
+    output_path:  c[:path],
+  )
+end
+```
+
+At runtime Android picks the right `rnotes` resource for the device locale automatically.
+
+#### `max_char_length` and `TranslationFitError`
+
+Formats can carry a `max_char_length` (e.g. 80 for a Play Store short description). When set, the translator iterates up to 3 attempts to fit. If no attempt fits — Cyrillic and German routinely expand 30–50% vs English, so this is a real failure mode for tight limits — the action fails loud with:
+
+```
+DevNotes: format 'play-store-short' translation to ru-RU could not fit
+max_char_length=80 (best attempt was 94 chars after 3 tries). Either
+raise max_char_length on the format in the DevNotes UI, or pick a less
+verbose source content for this release.
+```
+
+That's enough signal to decide whether the constraint can be widened or whether the English source needs a tighter rewrite.
 
 ### Disambiguation
 
@@ -165,6 +223,7 @@ DEVNOTES_API_KEY         # the bearer token (required)
 DEVNOTES_PROJECT_SLUG    # recommended; "<owner>/<slug>" or bare "<slug>"
 # DEVNOTES_PROJECT_NAME  # deprecated; mutable display name
 # DEVNOTES_FORMAT_SLUG   # optional; defaults to "mobile-html"
+# DEVNOTES_LOCALE        # optional; BCP 47 tag for translated output
 ```
 
 With those exported, the Fastfile call can be parameter-free and the action picks values from the environment.
@@ -186,7 +245,7 @@ Bump the `tag:` in your Pluginfile and run `bundle install`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.4.0"   # ← update tag
+    tag: "v0.5.0"   # ← update tag
 ```
 
 Releases are tagged in this repo; check the [tags](https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes/tags) page for what's available.
