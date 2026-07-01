@@ -2,11 +2,11 @@ require "spec_helper"
 require "fileutils"
 require "tmpdir"
 
-# End-to-end WebMock-stubbed run of the action: tmp res/raw-{en,ru,de}/
-# tree, stubbed project lookup + submit + poll + 3 format-output calls,
-# assertions on the supply metadata files written. This is the contract
-# guard for the action — covers the auto-discovery path, the per-locale
-# write, and the SharedValues lane-context return.
+# End-to-end WebMock-stubbed run of the action: tmp res/values-{en,ru,de}/
+# tree (the canonical Android "we ship this language" signal), stubbed
+# project lookup + submit + poll + 3 format-output calls, assertions on
+# the supply metadata files written. Contract guard for the action —
+# covers auto-discovery, per-locale write, and SharedValues lane-context.
 RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
   let(:api_url) { "https://api.devnotes.test" }
   let(:api_key) { "test-key-abc" }
@@ -60,14 +60,15 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
   around do |example|
     Dir.mktmpdir("devnotes-play-spec-") do |tmp|
       @project_root = tmp
-      FileUtils.mkdir_p(File.join(tmp, "app/src/main/res/raw"))      # default, will be skipped
-      FileUtils.mkdir_p(File.join(tmp, "app/src/main/res/raw-ru"))
-      FileUtils.mkdir_p(File.join(tmp, "app/src/main/res/raw-de"))
-      # Marker files — the action doesn't read these but having them
-      # mirrors the real CI layout produced by devnotes_fetch_inline.
-      File.write(File.join(tmp, "app/src/main/res/raw/rnotes.txt"), "EN source")
-      File.write(File.join(tmp, "app/src/main/res/raw-ru/rnotes.txt"), "RU source")
-      File.write(File.join(tmp, "app/src/main/res/raw-de/rnotes.txt"), "DE source")
+      FileUtils.mkdir_p(File.join(tmp, "app/src/main/res/values"))    # default, will be skipped
+      FileUtils.mkdir_p(File.join(tmp, "app/src/main/res/values-ru"))
+      FileUtils.mkdir_p(File.join(tmp, "app/src/main/res/values-de"))
+      # Marker files — the action doesn't read these; having them
+      # mirrors the real Android layout (strings.xml is the canonical
+      # shipping-languages declaration).
+      File.write(File.join(tmp, "app/src/main/res/values/strings.xml"), "<resources/>")
+      File.write(File.join(tmp, "app/src/main/res/values-ru/strings.xml"), "<resources/>")
+      File.write(File.join(tmp, "app/src/main/res/values-de/strings.xml"), "<resources/>")
       example.run
     end
   end
@@ -123,12 +124,12 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
   # ---- the happy paths ---------------------------------------------------
 
   describe "auto-discovery mode" do
-    it "skips non-locale Android qualifiers (raw-night, raw-v21, raw-car) and writes only locale files" do
+    it "skips non-locale Android qualifiers (values-night, values-v21, values-car) and writes only locale files" do
       # Add non-locale qualifiers to the tmp tree — these are legitimate
       # Android resource directories that must NOT crash the lane.
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-night"))
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-v21"))
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-car"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-night"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-v21"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-car"))
 
       stub_happy_path([
         ["ru-RU", "ru body", true, 1],
@@ -141,13 +142,13 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
         version_code: version_code,
       )
 
-      # ru-RU and de-DE write; raw-night / raw-v21 / raw-car are skipped.
+      # ru-RU and de-DE write; values-night / values-v21 / values-car are skipped.
       expect(result[:locales]).to contain_exactly("ru-RU", "de-DE")
       skipped_quals = result[:skipped].map { |s| s[:qualifier] }
-      expect(skipped_quals).to include("raw-night", "raw-v21", "raw-car", "raw")
+      expect(skipped_quals).to include("values-night", "values-v21", "values-car", "values")
     end
 
-    it "discovers raw-{ru,de}, skips raw/, writes two changelog files" do
+    it "discovers values-{ru,de}, skips values/, writes two changelog files" do
       stub_happy_path([
         ["ru-RU", "ru-changelog 🚀", true, 1],
         ["de-DE", "de-changelog 🚀", true, 2],
@@ -161,7 +162,7 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
       )
 
       expect(result[:locales]).to contain_exactly("ru-RU", "de-DE")
-      expect(result[:skipped].map { |s| s[:qualifier] }).to include("raw")
+      expect(result[:skipped].map { |s| s[:qualifier] }).to include("values")
 
       ru_path = File.join(@project_root, "fastlane/metadata/android/ru-RU/changelogs/#{version_code}.txt")
       de_path = File.join(@project_root, "fastlane/metadata/android/de-DE/changelogs/#{version_code}.txt")
@@ -191,10 +192,10 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
 
   describe "qualifier_overrides — auto-discovery rescues ambiguous / unmapped" do
     it "rescues bare 'pt' via qualifier_overrides → auto-discovery works" do
-      # Add raw-pt to the tree — the ambiguous case that would hard-fail
+      # Add values-pt to the tree — the ambiguous case that would hard-fail
       # in v0.6.0. With qualifier_overrides declaring pt → pt-PT, the
       # ambiguity guard is bypassed and auto-discovery completes.
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-pt"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-pt"))
 
       stub_happy_path([
         ["ru-RU", "ru body", true, 1],
@@ -214,11 +215,11 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
       expect(File.exist?(pt_path)).to be(true)
     end
 
-    it "writes BOTH raw-pt AND raw-pt-rBR when both exist (region-dedup is gone)" do
-      # v0.6.0 silently dropped raw-pt when raw-pt-rBR existed. v0.6.1
+    it "writes BOTH values-pt AND values-pt-rBR when both exist (region-dedup is gone)" do
+      # v0.6.0 silently dropped values-pt when values-pt-rBR existed. v0.6.1
       # writes both — apps with distinct locale listings depend on this.
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-pt"))
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-pt-rBR"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-pt"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-pt-rBR"))
 
       stub_happy_path([
         ["ru-RU", "ru", true, 1],
@@ -240,9 +241,9 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
   end
 
   describe "strict: true — silent skip becomes hard-fail" do
-    it "hard-fails on an unmapped bare-language qualifier (raw-fa)" do
-      # v0.6.0 silently skipped raw-fa. Under strict, it must abort.
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-fa"))
+    it "hard-fails on an unmapped bare-language qualifier (values-fa)" do
+      # v0.6.0 silently skipped values-fa. Under strict, it must abort.
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-fa"))
 
       stub_happy_path([])
 
@@ -253,13 +254,13 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
           version_code: version_code,
           strict: true,
         )
-      end.to raise_error(FastlaneCore::Interface::FastlaneError, /raw-fa.*strict/mi)
+      end.to raise_error(FastlaneCore::Interface::FastlaneError, /values-fa.*strict/mi)
     end
 
-    it "still skips MALFORMED qualifiers (raw-night) even under strict" do
-      # raw-night is genuinely not a locale — strict shouldn't turn
+    it "still skips MALFORMED qualifiers (values-night) even under strict" do
+      # values-night is genuinely not a locale — strict shouldn't turn
       # ANDROID resource qualifiers into build breakers.
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-night"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-night"))
 
       stub_happy_path([
         ["ru-RU", "ru", true, 1],
@@ -274,13 +275,13 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
       )
 
       expect(result[:locales]).to contain_exactly("ru-RU", "de-DE")
-      expect(result[:skipped].map { |s| s[:qualifier] }).to include("raw-night")
+      expect(result[:skipped].map { |s| s[:qualifier] }).to include("values-night")
     end
 
     it "qualifier_overrides + strict together — override wins over strict" do
       # If the operator explicitly declared a mapping, strict shouldn't
       # trip because there's no unresolved qualifier.
-      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-fa"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/values-fa"))
 
       stub_happy_path([
         ["ru-RU", "ru", true, 1],

@@ -97,7 +97,7 @@ module Fastlane
         if pairs.empty?
           UI.important(
             "DevNotes: no locales to write — pass `locales: [...]` explicitly " \
-            "or populate res/raw-*/ via devnotes_fetch_inline first."
+            "or verify res/values-*/ dirs exist for your shipped locales."
           )
           return finalize({}, skipped)
         end
@@ -171,62 +171,65 @@ module Fastlane
         end
       end
 
-      # Auto-discovery: walk <res_path>/raw* directories. For each, map
-      # the qualifier to BCP 47 (honoring `qualifier_overrides` first),
-      # then to a Play Store code. Skip `raw/` (default qualifier) with
-      # a one-line UI.important rather than guessing en-US — that guess
-      # silently writes the wrong file when the app's default language
-      # isn't English.
+      # Auto-discovery: walk <res_path>/values-* directories — the
+      # canonical Android "we ship this language" signal (the resource
+      # compiler pulls a locale into the AAB iff a values-<qualifier>/
+      # dir exists for it). Map each qualifier to BCP 47 (honoring
+      # `qualifier_overrides` first), then to a Play Store code. Skip
+      # bare `values/` (default qualifier) with a one-line UI.important
+      # rather than guessing en-US — that guess silently writes the
+      # wrong file when the app's default language isn't English.
       #
-      # Behavior changes vs v0.6.0:
-      # - The silent region-dedup pass is GONE. If both `raw-pt` and
-      #   `raw-pt-rBR` exist, both get written. The old dedup silently
-      #   dropped `raw-pt`, which was wrong for apps that use the bare
-      #   qualifier as a distinct listing (e.g. `raw-es` = es-419 Latin
-      #   America, `raw-es-rES` = es-ES Spain).
+      # Behavior:
       # - `qualifier_overrides` is checked FIRST inside qualifier_to_bcp47,
       #   so the ambiguous (pt/zh/es) hard-fail and the :unknown
       #   silent-skip are both configurable.
       # - `strict: true` turns :unknown from silent-skip into hard-fail
       #   so a supported language never vanishes from a release.
-      #   :malformed (non-locale qualifiers like raw-night / raw-v21)
-      #   still skips because those are genuinely not-locales.
+      #   :malformed (non-locale qualifiers like values-night / values-v21 /
+      #   values-w720dp / values-mdpi) still skips because those are
+      #   genuinely not-locales.
+      # - Both `values-<lang>` and `values-<lang>-r<REGION>` write when
+      #   both exist — the previous silent region-dedup pass is gone
+      #   (was wrong for apps using the bare form as a distinct listing,
+      #   e.g. values-es = es-419 vs values-es-rES = es-ES).
       def self.build_pairs_from_res_path(res_path, overrides, qualifier_overrides, strict, skipped)
         unless File.directory?(res_path)
           UI.important(
             "DevNotes: res_path '#{res_path}' is not a directory — nothing to auto-discover. " \
-            "Pass `locales: [...]` explicitly or set res_path to your AGP source tree."
+            "Pass `locales: [...]` explicitly or set res_path to your AGP source tree " \
+            "(default: app/src/main/res; module-root layouts should pass res_path: 'res')."
           )
           return []
         end
 
-        # Gather every raw-* dir; record bare `raw/` as skipped.
+        # Gather every values-* dir; record bare `values/` as skipped.
         qualifiers = []
         Dir.children(res_path).each do |entry|
           full = File.join(res_path, entry)
           next unless File.directory?(full)
-          if entry == "raw"
+          if entry == "values"
             UI.important(
-              "DevNotes: found '#{res_path}/raw/' (default Android qualifier) — skipping. " \
+              "DevNotes: found '#{res_path}/values/' (default Android qualifier) — skipping. " \
               "Add the desired locale (e.g. 'en-US') to `locales: [...]` if you want it included."
             )
-            skipped << { qualifier: "raw", reason: "default qualifier — add to locales: explicitly" }
+            skipped << { qualifier: "values", reason: "default qualifier — add to locales: explicitly" }
             next
           end
-          if entry.start_with?("raw-")
-            qualifiers << entry.sub(/\Araw-/, "")
+          if entry.start_with?("values-")
+            qualifiers << entry.sub(/\Avalues-/, "")
           end
         end
 
         # Map each qualifier individually. Non-locale Android qualifiers
-        # (raw-night, raw-v21, raw-car, raw-mcc310, …) produce :unknown
-        # or :malformed UnmappableQualifierError. :malformed always
-        # skips (they're not locales). :unknown skips by default but
-        # HARD-FAILS when strict: true (turns silent language-drop into
-        # a build failure — the safer prod posture per the podcast-guru
-        # integration feedback). AMBIGUOUS bare-languages always
-        # hard-fail unless the operator declared a mapping in
-        # qualifier_overrides (which qualifier_to_bcp47 checks first).
+        # (values-night, values-v21, values-w720dp, values-mdpi, values-port,
+        # …) produce :unknown or :malformed UnmappableQualifierError.
+        # :malformed always skips (they're not locales). :unknown skips
+        # by default but HARD-FAILS when strict: true (safer prod
+        # posture — a supported language never vanishes from a release).
+        # AMBIGUOUS bare-languages always hard-fail unless the operator
+        # declared a mapping in qualifier_overrides (which
+        # qualifier_to_bcp47 checks first).
         pairs = []
         qualifiers.sort.each do |q|
           begin
@@ -243,22 +246,22 @@ module Fastlane
             when :unknown
               if strict
                 UI.user_error!(
-                  "DevNotes: found 'raw-#{q}' but no BCP 47 mapping for it, and `strict: true` " \
+                  "DevNotes: found 'values-#{q}' but no BCP 47 mapping for it, and `strict: true` " \
                   "is set. Either add to `qualifier_overrides: { \"#{q}\" => \"<bcp47>\" }`, " \
                   "list it explicitly in `locales:`, or turn off `strict:` (default). Underlying: #{e.message.lines.first.strip}"
                 )
               else
                 UI.important(
-                  "DevNotes: skipping 'raw-#{q}' — #{e.message.lines.first.strip} " \
+                  "DevNotes: skipping 'values-#{q}' — #{e.message.lines.first.strip} " \
                   "(Pass `strict: true` to hard-fail instead of skipping, or map it in `qualifier_overrides`.)"
                 )
-                skipped << { qualifier: "raw-#{q}", reason: e.reason }
+                skipped << { qualifier: "values-#{q}", reason: e.reason }
               end
-            else  # :malformed — genuinely not a locale (raw-night, raw-v21, etc.); skip regardless of strict.
+            else  # :malformed — genuinely not a locale (values-night, values-w720dp, etc.); skip regardless of strict.
               UI.important(
-                "DevNotes: skipping 'raw-#{q}' — #{e.message.lines.first.strip}"
+                "DevNotes: skipping 'values-#{q}' — #{e.message.lines.first.strip}"
               )
-              skipped << { qualifier: "raw-#{q}", reason: e.reason }
+              skipped << { qualifier: "values-#{q}", reason: e.reason }
             end
           end
         end
@@ -300,14 +303,19 @@ module Fastlane
           Two locale discovery modes:
             1. Explicit `locales: ["en-US", "ru-RU", ...]` — operator
                controls the set verbatim.
-            2. Auto-discovery (default): scan <res_path>/raw-*/ for
-               directories. Each Android resource qualifier (raw-ru,
-               raw-pt-rBR, etc.) maps to a BCP 47 code and then to a
-               Play Store metadata locale. The bare `raw/` qualifier
-               is skipped — add to `locales:` if you want it.
+            2. Auto-discovery (default): scan <res_path>/values-*/ for
+               directories — the canonical Android "we ship this
+               language" signal (the resource compiler pulls a locale
+               into the AAB iff values-<qualifier>/ exists). Each
+               qualifier (values-ru, values-pt-rBR, etc.) maps to a
+               BCP 47 code and then to a Play Store metadata locale.
+               Non-locale qualifiers (values-night, values-mdpi,
+               values-w720dp, …) fall through and skip. Bare `values/`
+               (default qualifier) is skipped — add to `locales:` if
+               you want it.
 
-          Run AFTER devnotes_fetch_inline (which populates the raw-*
-          tree) and BEFORE upload_to_play_store(skip_upload_apk: true).
+          Run BEFORE upload_to_play_store(skip_upload_apk: true) so
+          supply picks up the metadata tree in the same push.
 
           The DevNotes backend handles per-locale translation,
           max_char_length retry-to-fit, and caching by
@@ -395,7 +403,7 @@ module Fastlane
             description: (
               "Optional explicit BCP 47 locale list (e.g. ['en-US', 'ru-RU']). When " \
               "set, res_path is NOT inspected. When unset (default), the action " \
-              "auto-discovers from <res_path>/raw-*/ directories"
+              "auto-discovers from <res_path>/values-*/ directories (the canonical Android shipped-languages signal)"
             ),
             optional: true,
             type: Array
@@ -404,9 +412,11 @@ module Fastlane
             key: :res_path,
             env_name: "DEVNOTES_PLAY_RES_PATH",
             description: (
-              "Android resource directory to scan when auto-discovering locales " \
-              "(ignored when `locales:` is set). Relative paths resolve from the " \
-              "project root, not Dir.pwd"
+              "Root of the Android resource directory (containing values-*/ " \
+              "dirs) to scan when auto-discovering locales. Ignored when " \
+              "`locales:` is set. Relative paths resolve from the project root, " \
+              "not Dir.pwd. Default is the AGP layout; module-root / flat " \
+              "Gradle layouts should pass `res_path: \"res\"`"
             ),
             optional: true,
             default_value: DEFAULT_RES_PATH,
@@ -463,7 +473,7 @@ module Fastlane
               "build instead of silently skipping the locale. Recommended for " \
               "production so a supported language never vanishes from a " \
               "release when a translator adds a new values-<lang>/ dir. Genuinely " \
-              "non-locale qualifiers (raw-night, raw-v21, raw-car) still skip " \
+              "non-locale qualifiers (values-night, values-v21, values-mdpi, values-w720dp) still skip " \
               "regardless of this flag. Auto-discovery mode only"
             ),
             optional: true,
