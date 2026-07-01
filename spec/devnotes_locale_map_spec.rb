@@ -103,6 +103,61 @@ RSpec.describe Fastlane::Helper::DevnotesLocaleMap do
       end
     end
 
+    context "qualifier_overrides (operator's Rosetta table)" do
+      it "rescues an AMBIGUOUS bare-language qualifier (pt → pt-PT)" do
+        # Without overrides, bare "pt" hard-fails. With an override
+        # declared, the override wins BEFORE the ambiguity guard runs.
+        expect(described_class.qualifier_to_bcp47("pt", overrides: { "pt" => "pt-PT" }))
+          .to eq("pt-PT")
+      end
+
+      it "rescues an UNMAPPED bare-language qualifier (fa → fa)" do
+        # fa isn't in BARE_LANGUAGE_DEFAULTS; without overrides, it
+        # raises :unknown. With an override, the mapping is used.
+        expect(described_class.qualifier_to_bcp47("fa", overrides: { "fa" => "fa" }))
+          .to eq("fa")
+      end
+
+      it "overrides can override a normally-mapped bare-language (en → en-GB)" do
+        # Built-in default is en → en-US; override wins.
+        expect(described_class.qualifier_to_bcp47("en", overrides: { "en" => "en-GB" }))
+          .to eq("en-GB")
+      end
+
+      it "overrides work on a region-qualified qualifier ('es-rMX' → 'es-419')" do
+        # Some ops want raw-es-rMX to collapse to es-419 immediately at
+        # the qualifier layer (skipping the built-in region-qualified
+        # path). Overrides run first, so this works.
+        expect(described_class.qualifier_to_bcp47("es-rMX", overrides: { "es-rMX" => "es-419" }))
+          .to eq("es-419")
+      end
+
+      it "no override matches → falls through to built-in rules" do
+        # If overrides doesn't contain the qualifier, downstream rules
+        # run normally. Guarantees the escape hatch doesn't accidentally
+        # shadow the built-in defaults for unrelated qualifiers.
+        expect(described_class.qualifier_to_bcp47("ru", overrides: { "pt" => "pt-PT" }))
+          .to eq("ru-RU")
+      end
+
+      it "nil overrides is safe" do
+        expect(described_class.qualifier_to_bcp47("ru", overrides: nil)).to eq("ru-RU")
+      end
+
+      it "empty-string override value falls through to built-in rules" do
+        # Defensive: an operator typo like `{ "ru" => "" }` should NOT
+        # return "" and silently ship a blank locale downstream. Fall
+        # through instead so the built-in default takes over.
+        expect(described_class.qualifier_to_bcp47("ru", overrides: { "ru" => "" }))
+          .to eq("ru-RU")
+      end
+
+      it "whitespace-only override value also falls through" do
+        expect(described_class.qualifier_to_bcp47("ru", overrides: { "ru" => "   " }))
+          .to eq("ru-RU")
+      end
+    end
+
     context "malformed qualifier (longer than 3 chars, not a locale shape)" do
       it "raises :malformed for 'night' (Android UI mode qualifier)" do
         described_class.qualifier_to_bcp47("night")

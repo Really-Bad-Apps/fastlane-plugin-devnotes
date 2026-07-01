@@ -78,15 +78,18 @@ module Fastlane
 
         # Build the (bcp47, play_store_locale) pair list. Two discovery
         # modes: explicit `locales:` arg wins outright; otherwise scan
-        # `<res_path>/raw*` and map qualifiers to BCP 47. The bonus dedup
-        # for "both raw-pt and raw-pt-rBR exist" lives in build_pairs_from_res_path.
+        # `<res_path>/raw*` and map qualifiers to BCP 47.
         skipped = []
+        qualifier_overrides = params[:qualifier_overrides] || {}
+        strict = params[:strict] == true
         pairs = if params[:locales].is_a?(Array) && !params[:locales].empty?
           build_pairs_from_explicit(params[:locales], overrides)
         else
           build_pairs_from_res_path(
             File.expand_path(params[:res_path], project_root),
             overrides,
+            qualifier_overrides,
+            strict,
             skipped
           )
         end
@@ -169,11 +172,26 @@ module Fastlane
       end
 
       # Auto-discovery: walk <res_path>/raw* directories. For each, map
-      # the qualifier to BCP 47, then to a Play Store code. Skip `raw/`
-      # (default qualifier) with a one-line UI.important rather than
-      # guessing en-US — that guess silently writes the wrong file when
-      # the app's default language isn't English.
-      def self.build_pairs_from_res_path(res_path, overrides, skipped)
+      # the qualifier to BCP 47 (honoring `qualifier_overrides` first),
+      # then to a Play Store code. Skip `raw/` (default qualifier) with
+      # a one-line UI.important rather than guessing en-US — that guess
+      # silently writes the wrong file when the app's default language
+      # isn't English.
+      #
+      # Behavior changes vs v0.6.0:
+      # - The silent region-dedup pass is GONE. If both `raw-pt` and
+      #   `raw-pt-rBR` exist, both get written. The old dedup silently
+      #   dropped `raw-pt`, which was wrong for apps that use the bare
+      #   qualifier as a distinct listing (e.g. `raw-es` = es-419 Latin
+      #   America, `raw-es-rES` = es-ES Spain).
+      # - `qualifier_overrides` is checked FIRST inside qualifier_to_bcp47,
+      #   so the ambiguous (pt/zh/es) hard-fail and the :unknown
+      #   silent-skip are both configurable.
+      # - `strict: true` turns :unknown from silent-skip into hard-fail
+      #   so a supported language never vanishes from a release.
+      #   :malformed (non-locale qualifiers like raw-night / raw-v21)
+      #   still skips because those are genuinely not-locales.
+      def self.build_pairs_from_res_path(res_path, overrides, qualifier_overrides, strict, skipped)
         unless File.directory?(res_path)
           UI.important(
             "DevNotes: res_path '#{res_path}' is not a directory — nothing to auto-discover. " \
@@ -200,39 +218,43 @@ module Fastlane
           end
         end
 
-        # Dedup: if both `pt` and `pt-rBR` are present, the region-qualified
-        # version wins (it's MORE specific, not ambiguous-vs-it). Strip the
-        # bare-language form so we don't emit two writes that target the
-        # same Play Store locale.
-        qualified_langs = qualifiers
-          .select { |q| q.include?("-r") }
-          .map { |q| q.split("-r", 2).first }
-        qualifiers.reject! do |q|
-          if !q.include?("-r") && !q.start_with?("b+") && qualified_langs.include?(q)
-            skipped << { qualifier: "raw-#{q}", reason: "shadowed by a more-specific raw-#{q}-r<REGION>" }
-            true
-          else
-            false
-          end
-        end
-
         # Map each qualifier individually. Non-locale Android qualifiers
         # (raw-night, raw-v21, raw-car, raw-mcc310, …) produce :unknown
-        # or :malformed UnmappableQualifierError and are skipped with a
-        # warning so the lane keeps going. AMBIGUOUS bare-languages (pt,
-        # zh, es) hard-fail because the operator clearly meant a locale
-        # and needs to disambiguate.
+        # or :malformed UnmappableQualifierError. :malformed always
+        # skips (they're not locales). :unknown skips by default but
+        # HARD-FAILS when strict: true (turns silent language-drop into
+        # a build failure — the safer prod posture per the podcast-guru
+        # integration feedback). AMBIGUOUS bare-languages always
+        # hard-fail unless the operator declared a mapping in
+        # qualifier_overrides (which qualifier_to_bcp47 checks first).
         pairs = []
         qualifiers.sort.each do |q|
           begin
-            bcp47 = Helper::DevnotesLocaleMap.qualifier_to_bcp47(q)
+            bcp47 = Helper::DevnotesLocaleMap.qualifier_to_bcp47(q, overrides: qualifier_overrides)
             play_store = Helper::DevnotesLocaleMap.bcp47_to_play_store(bcp47, overrides: overrides)
             pairs << [bcp47, play_store]
           rescue Helper::DevnotesLocaleMap::UnmappableQualifierError => e
             case e.reason
             when :ambiguous
-              UI.user_error!("DevNotes: #{e.message}")
-            else  # :unknown or :malformed — non-locale qualifier, skip
+              UI.user_error!(
+                "DevNotes: #{e.message} (Or declare a mapping in " \
+                "`qualifier_overrides: { \"#{q}\" => \"<bcp47>\" }` — that check runs BEFORE the ambiguity guard.)"
+              )
+            when :unknown
+              if strict
+                UI.user_error!(
+                  "DevNotes: found 'raw-#{q}' but no BCP 47 mapping for it, and `strict: true` " \
+                  "is set. Either add to `qualifier_overrides: { \"#{q}\" => \"<bcp47>\" }`, " \
+                  "list it explicitly in `locales:`, or turn off `strict:` (default). Underlying: #{e.message.lines.first.strip}"
+                )
+              else
+                UI.important(
+                  "DevNotes: skipping 'raw-#{q}' — #{e.message.lines.first.strip} " \
+                  "(Pass `strict: true` to hard-fail instead of skipping, or map it in `qualifier_overrides`.)"
+                )
+                skipped << { qualifier: "raw-#{q}", reason: e.reason }
+              end
+            else  # :malformed — genuinely not a locale (raw-night, raw-v21, etc.); skip regardless of strict.
               UI.important(
                 "DevNotes: skipping 'raw-#{q}' — #{e.message.lines.first.strip}"
               )
@@ -408,10 +430,46 @@ module Fastlane
             description: (
               "Optional Hash rewriting BCP 47 → Play Store metadata codes (e.g. " \
               "{ 'es-MX' => 'es-MX' } to override the default es-419 collapse). " \
-              "Applied AFTER the built-in quirks pass"
+              "Applied AFTER the built-in quirks pass. NOTE: this leg runs " \
+              "AFTER qualifier_to_bcp47 — so it cannot rescue ambiguous " \
+              "bare-language qualifiers (pt/zh/es). Use `qualifier_overrides:` " \
+              "for that; use `locale_overrides:` only to remap a resolved BCP 47 " \
+              "code onto a different Play Store listing"
             ),
             optional: true,
             type: Hash
+          ),
+          FastlaneCore::ConfigItem.new(
+            key: :qualifier_overrides,
+            env_name: "DEVNOTES_PLAY_QUALIFIER_OVERRIDES",
+            description: (
+              "Optional Hash rewriting Android resource qualifier → BCP 47 " \
+              "(e.g. { 'pt' => 'pt-PT', 'es' => 'es-419', 'fa' => 'fa' }). " \
+              "Consulted FIRST inside qualifier_to_bcp47, before any built-in " \
+              "rule — so this is the escape hatch for ambiguous bare-language " \
+              "cases (pt/zh/es) that would otherwise hard-fail AND for unmapped " \
+              "bare-languages (fa, hy, etc.) that would otherwise silently skip. " \
+              "Auto-discovery mode only (ignored when `locales:` is set)"
+            ),
+            optional: true,
+            type: Hash
+          ),
+          FastlaneCore::ConfigItem.new(
+            key: :strict,
+            env_name: "DEVNOTES_PLAY_STRICT",
+            description: (
+              "When true, an Android qualifier the plugin can't map (e.g. a " \
+              "language code not in BARE_LANGUAGE_DEFAULTS) HARD-FAILS the " \
+              "build instead of silently skipping the locale. Recommended for " \
+              "production so a supported language never vanishes from a " \
+              "release when a translator adds a new values-<lang>/ dir. Genuinely " \
+              "non-locale qualifiers (raw-night, raw-v21, raw-car) still skip " \
+              "regardless of this flag. Auto-discovery mode only"
+            ),
+            optional: true,
+            default_value: false,
+            is_string: false,
+            type: Boolean
           ),
           FastlaneCore::ConfigItem.new(
             key: :poll_interval,

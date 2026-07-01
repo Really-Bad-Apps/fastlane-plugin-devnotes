@@ -114,11 +114,37 @@ module Fastlane
       #   "pt-rBR"       → split on -r, return "pt-BR"
       #   "zh-rTW"       → "zh-TW"
       #   "b+zh+Hans+CN" → BCP 47 form, joined with "-" → "zh-Hans-CN"
-      def self.qualifier_to_bcp47(qualifier)
+      #
+      # `overrides` (default `{}`) is the operator's Rosetta table: an
+      # Android-qualifier-string → BCP-47-string map that gets checked
+      # FIRST, before any of the built-in rules. This is the escape
+      # hatch for the ambiguous cases (pt/zh/es — where the built-in
+      # rules hard-fail) and for unmapped bare-languages (fa, hy, etc.)
+      # that would otherwise silently skip in the action's discovery
+      # loop. Passing `overrides: { "pt" => "pt-PT", "es" => "es-419",
+      # "fa" => "fa" }` makes auto-discovery Just Work for those apps.
+      def self.qualifier_to_bcp47(qualifier, overrides: {})
         raise DefaultQualifierError, "bare raw/ qualifier" if qualifier.nil?
 
         normalized = qualifier.to_s.strip
         raise UnmappableQualifierError.new(qualifier, "empty qualifier") if normalized.empty?
+
+        # Operator's Rosetta table wins over every built-in rule. This
+        # is what makes the ambiguous (pt/zh/es) hard-fail path
+        # configurable — the AMBIGUOUS raise below is unreachable when
+        # the operator has already declared a decision for that
+        # qualifier. Same for unmapped bare-languages (fa, hy, …).
+        # Empty / whitespace-only override values fall through so a
+        # typo like `{ "pt" => "" }` doesn't silently ship a blank
+        # locale — the downstream ArgumentError isn't caught by the
+        # action's rescue chain, better to just ignore the entry and
+        # surface the fall-through error path.
+        if overrides
+          override_value = overrides[normalized]
+          if override_value && !override_value.to_s.strip.empty?
+            return override_value.to_s
+          end
+        end
 
         # Newer BCP 47 form: b+lang[+script[+region]]
         if normalized.start_with?("b+")

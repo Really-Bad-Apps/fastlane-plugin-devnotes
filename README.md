@@ -24,7 +24,7 @@ Add to your project's `fastlane/Pluginfile`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.6.0"
+    tag: "v0.6.1"
 ```
 
 Then:
@@ -35,7 +35,9 @@ bundle install
 
 > Pin a specific `tag:` for production builds. `branch: "main"` works for testing but is a rolling reference.
 
-> ✨ **What's new in v0.6.0?** New `devnotes_write_play_changelogs` action — fetches a per-locale DevNotes format (e.g. `play-store-changelog` with `max_char_length=480`) and writes one file per locale to `fastlane/metadata/android/<locale>/changelogs/<version_code>.txt`. Chains cleanly into `upload_to_play_store(skip_upload_apk: true)`. Auto-discovers locales from your existing `res/raw-*/` tree by default. See [Action: devnotes_write_play_changelogs](#action-devnotes_write_play_changelogs) below.
+> ✨ **What's new in v0.6.1?** Two safety knobs on `devnotes_write_play_changelogs` in response to real integration feedback: `qualifier_overrides:` (declare `pt → pt-PT`, `es → es-419`, unmapped languages like `fa → fa` once and let auto-discovery work — consulted BEFORE the ambiguity guard), and `strict: true` (turn silent language-drop into a hard-fail so a supported locale never vanishes from a release). The silent `raw-pt` / `raw-pt-rBR` region-dedup pass is gone — v0.6.0 wrongly dropped one when both existed as distinct Play listings; now both write. See the [Auto-discovery caveats](#auto-discovery-caveats) callout for the full changed behavior.
+
+> ✨ **What's new in v0.6.0?** New `devnotes_write_play_changelogs` action — fetches a per-locale DevNotes format (e.g. `play-store-changelog` with `max_char_length=480`) and writes one file per locale to `fastlane/metadata/android/<locale>/changelogs/<version_code>.txt`. Chains cleanly into `upload_to_play_store(skip_upload_apk: true)`. See [Action: devnotes_write_play_changelogs](#action-devnotes_write_play_changelogs) below.
 
 > ✨ **What's new in v0.5.0?** Optional `locale:` action option (env `DEVNOTES_LOCALE`) — pass a BCP 47 tag like `"es-MX"` or `"ru-RU"` to bundle a translated format output. Backwards-compatible: existing Fastfiles work unchanged (no `locale:` ⇒ source English). See [Translations](#translations) below.
 
@@ -151,10 +153,12 @@ Fetches a per-locale DevNotes format (e.g. `play-store-changelog` with `max_char
 | `from_tag`          | `DEVNOTES_FROM_TAG`                | no       | auto-detected from prod store       | Git tag to diff from. |
 | `format_slug`       | `DEVNOTES_PLAY_FORMAT_SLUG`        | no       | `"play-store-changelog"`            | The DevNotes format to fetch per locale. Define it in the DevNotes UI with `max_char_length=480` and a plain-text + emoji prompt — see [Play Store format setup](#play-store-format-setup). |
 | `version_code`      | `DEVNOTES_PLAY_VERSION_CODE`       | **yes**  | —                                   | The Android `versionCode` the changelog attaches to. Integer or String of digits. Must match the build supply uploads or the changelog attaches to the wrong build. |
-| `locales`           | `DEVNOTES_PLAY_LOCALES`            | no       | auto-discover from `res_path`        | Explicit BCP 47 list (e.g. `["en-US", "ru-RU"]`). When set, `res_path` is NOT inspected. Use this when you want exact control over which locales upload. |
-| `res_path`          | `DEVNOTES_PLAY_RES_PATH`           | no       | `app/src/main/res`                  | Android resource directory scanned for `raw-*/` qualifiers when auto-discovering locales. Relative paths resolve from the project root. |
+| `locales`           | `DEVNOTES_PLAY_LOCALES`            | no       | auto-discover from `res_path`        | **Recommended for production.** Explicit BCP 47 list (e.g. `["en-US", "ru-RU"]`). When set, `res_path` is NOT inspected. See [Recommended production recipe](#recommended-production-recipe) — real multi-locale apps need explicit control because auto-discovery's built-in Android-qualifier → BCP 47 defaults can silently mis-route locales like `raw-fa`, `raw-es`, and `raw-pt`. |
+| `res_path`          | `DEVNOTES_PLAY_RES_PATH`           | no       | `app/src/main/res`                  | Android resource directory scanned for `raw-*/` qualifiers when auto-discovering locales. Relative paths resolve from the project root. **If your module puts `res/` at the module root (legacy / flat Gradle layout), set this to `"res"` or auto-discovery finds nothing.** |
 | `metadata_path`     | `DEVNOTES_PLAY_METADATA_PATH`      | no       | `fastlane/metadata/android`         | Root of the supply metadata tree. Relative paths resolve from the project root. |
-| `locale_overrides`  | `DEVNOTES_PLAY_LOCALE_OVERRIDES`   | no       | `{}`                                | Hash of BCP 47 → Play Store metadata code rewrites (e.g. `{ "es-419" => "es-MX" }` to override the default Spanish collapse). Applied AFTER the built-in quirks pass. |
+| `qualifier_overrides` | `DEVNOTES_PLAY_QUALIFIER_OVERRIDES` | no    | `{}`                                | **v0.6.1+.** Android resource qualifier → BCP 47 escape hatch, e.g. `{ "pt" => "pt-PT", "es" => "es-419", "fa" => "fa" }`. Consulted BEFORE any built-in rule inside `qualifier_to_bcp47`, so this rescues ambiguous bare-languages (pt/zh/es — otherwise hard-fail) AND unmapped bare-languages (fa, hy, … — otherwise silently skip). Auto-discovery only; ignored when `locales:` is set. |
+| `strict`            | `DEVNOTES_PLAY_STRICT`             | no       | `false`                             | **v0.6.1+.** When `true`, an unmapped bare-language qualifier hard-fails the build instead of skipping with a warning. Genuine non-locale qualifiers (`raw-night`, `raw-v21`, `raw-car`) still skip regardless. Recommended for production: a language you ship should never vanish from a release just because someone added a new `values-<lang>/` dir the plugin doesn't know about. |
+| `locale_overrides`  | `DEVNOTES_PLAY_LOCALE_OVERRIDES`   | no       | `{}`                                | BCP 47 → Play Store metadata code rewrites (e.g. `{ "es-419" => "es-MX" }` to override the default Spanish collapse). Applied AFTER `qualifier_to_bcp47`. **This CANNOT rescue an ambiguous bare-language** (`raw-pt`, `raw-zh`, `raw-es`) — that path raises inside `qualifier_to_bcp47` before `locale_overrides` is consulted. Use `qualifier_overrides:` for that case. |
 | `poll_interval`     | `DEVNOTES_POLL_INTERVAL`           | no       | `10`                                | Seconds between job-status polls. |
 | `timeout`           | `DEVNOTES_TIMEOUT`                 | no       | `600`                               | Total seconds to wait for generation. |
 
@@ -162,19 +166,135 @@ Fetches a per-locale DevNotes format (e.g. `play-store-changelog` with `max_char
 
 **Order:** runs BEFORE `upload_to_play_store(skip_upload_apk: true)`. supply reads `fastlane/metadata/android/<locale>/changelogs/<vc>.txt` and uploads alongside the release track update.
 
-### Locale discovery
+### Content vs. selection
 
-Two modes — explicit wins outright over auto-discovery:
+The `res/` tree is consulted **only** to decide WHICH locales to request from DevNotes. The plugin never reads the CONTENT of `rnotes.txt` or `strings.xml` — the changelog text for each locale is generated fresh by the DevNotes backend (per-locale translation, `max_char_length` retry, etc.). So `res/raw-<lang>/` presence answers "does this app ship in language X?" but not "what does the release note say?"
 
-- **Explicit** (`locales: ["en-US", "ru-RU", ...]`): list verbatim. Each entry maps through the built-in BCP 47 → Play Store quirks (see [Play Store locale conventions](#play-store-locale-conventions)) and then through `locale_overrides:`. `res_path` is never inspected.
-- **Auto-discovery** (default): scans `<res_path>/raw-*/` for directories. Each Android resource qualifier maps to a BCP 47 code:
-  - `raw-ru` → `ru-RU` (safe defaults: `en`, `ru`, `ko`, `ja`, `de`, `fr`, `it`, `nl`, `pl`, `tr`, `th`, `vi`, `hi`, `ar`, `he`, `id`)
-  - `raw-pt-rBR` → `pt-BR` (explicit region wins)
-  - `raw-b+zh+Hans+CN` → `zh-Hans-CN` (newer BCP 47 form)
-  - **Hard-fail on ambiguous bare languages**: `raw-pt` (BR vs PT), `raw-zh` (CN vs TW vs HK), `raw-es` (ES vs 419 vs MX). The operator clearly meant a locale; rename to the region form (`raw-pt-rBR`) or pass `locales:` explicitly.
-  - **Skipped with a warning** for non-locale Android resource qualifiers: UI mode (`raw-night`, `raw-car`, `raw-television`), API version (`raw-v21`), density (`raw-mdpi`), orientation (`raw-port`), MCC/MNC, screen-size, etc. Auto-discovery emits one `UI.important` line per skipped dir and continues — your build doesn't break because some Android `res/raw-*/` dirs aren't locales.
-  - Bare `raw/` (default qualifier, no language) is **skipped with a warning** — add to `locales:` explicitly if you want it. The plugin doesn't guess `en-US` because that's wrong for apps whose default language isn't English.
-  - When BOTH `raw-pt` AND `raw-pt-rBR` exist, the qualified version wins; the bare version is dropped as redundant.
+That distinction matters for two decisions:
+- **Which directory to enumerate from.** The reference production recipe below scans `values-<qualifier>/` dirs, not `raw-<qualifier>/`, because `values-*/strings.xml` is the canonical source of truth for "we ship this language." Your `raw-*/rnotes.txt` set may lag or diverge (e.g. if a language was added after the last `devnotes_fetch_inline` run).
+- **Whether the plugin can infer locale correctness.** It can't. The Android qualifier → Play Store code mapping is a product decision — the two code systems are misaligned by design (`raw-zh-rCN` vs `zh-CN`, `raw-b+es+419` vs `es-419`, legacy `iw`/`in` vs standard `he`/`id`, distinct listings for `es-ES` vs `es-419` that don't share a source dir). Any real multi-locale app needs an explicit Rosetta table.
+
+### Auto-discovery caveats
+
+<sub>🚨 **Read this before relying on the auto-discovery default.** Real multi-locale apps hit these walls. The recommended recipe in the next section works around all of them.</sub>
+
+Auto-discovery scans `<res_path>/raw-*/` for directories and maps each Android resource qualifier to a BCP 47 code. Three ways it can go silently wrong (v0.6.1 provides knobs to fix each):
+
+| Failure mode | v0.6.0 behavior | v0.6.1 fix |
+| --- | --- | --- |
+| **Ambiguous bare-language** — `raw-pt` / `raw-zh` / `raw-es`. These are legit locale attempts but incomplete (BR vs PT, CN vs TW vs HK, ES vs 419 vs MX). | 💥 hard-fail | ✅ still hard-fails, UNLESS `qualifier_overrides: { "pt" => "pt-PT", ... }` declares the intent (checked FIRST inside `qualifier_to_bcp47`). |
+| **Unmapped bare-language** — `raw-fa` (Farsi), `raw-hy` (Armenian), any language not in the built-in `BARE_LANGUAGE_DEFAULTS` table. | ⚠️ **SILENTLY SKIPPED** with a `UI.important` warning line. A locale you ship simply vanishes from the release. This is the failure mode most likely to escape review. | ✅ `strict: true` turns this into a hard-fail; OR declare it in `qualifier_overrides` and it maps through normally. |
+| **`raw/` bare (default qualifier)** — Android's "no qualifier" bucket. May or may not be your default English. | ⚠️ silently skipped with warning | Same — add to `locales:` explicitly if wanted. Not enough signal to safely infer. |
+| **Non-locale Android qualifier** — `raw-night`, `raw-v21`, `raw-car`, `raw-mdpi`, `raw-port`, `raw-mcc310`, etc. These are UI mode, API version, density, orientation, MCC modifiers, not locales. | ✅ skipped with warning (correct behavior) | Same. `strict:` does NOT turn these into failures — they're legitimately not locales. |
+
+Additionally:
+
+- **`raw-pt` and `raw-pt-rBR` both present:** v0.6.0 silently dropped `raw-pt` (assumed shadowing). **v0.6.1 writes both** — the previous default was wrong for apps where the bare form represents a distinct listing (e.g. `raw-es` → es-419 vs `raw-es-rES` → es-ES).
+- **Legacy ISO 639 aliases:** Android historically uses `iw`/`in`/`ji`; the plugin translates to `he`/`id`/`yi` at the qualifier layer.
+- **`locale_overrides:` does NOT rescue ambiguous cases.** It's applied AFTER `qualifier_to_bcp47`, so a `raw-pt` hard-fail is already raised before overrides run. Use `qualifier_overrides:` (v0.6.1+) for that path.
+
+### Recommended production recipe
+
+For any app shipping more than a couple of locales, the safest pattern is: **explicit `locales:` derived at build time from your `values-<qualifier>/` dirs (the canonical shipping-languages signal) through an app-owned Rosetta table**, with a hard-fail if a new locale is added without a mapping. Copy this into your `Fastfile`:
+
+```ruby
+# App-owned Rosetta table: Android resource qualifier → Play Store metadata code.
+# Add every locale you actually ship. Missing entries → hard-fail at build time
+# (per the guard below) so a new values-<lang>/ dir can never silently miss
+# its Play Store "What's New" section. The bare `values/` dir (no qualifier) is
+# handled by the always-include-en-US tail below.
+ANDROID_TO_PLAY_LOCALE = {
+  "de"     => "de-DE",
+  "es"     => "es-419",    # bare = Latin America
+  "es-rES" => "es-ES",     # region-qualified = Spain (distinct Play listing)
+  "fa"     => "fa",        # unmapped in plugin defaults — declare here
+  "fr"     => "fr-FR",
+  "it"     => "it-IT",
+  "ja"     => "ja-JP",
+  "ko"     => "ko-KR",
+  "pt"     => "pt-PT",     # bare = European (or use pt-BR — your call)
+  "pt-rBR" => "pt-BR",
+  "ru"     => "ru-RU",
+  "zh-rCN" => "zh-CN",
+  "zh-rTW" => "zh-TW",
+}
+
+# Locale-shaped Android qualifier: <lang>[-r<REGION>] or newer b+ form.
+# Anything else in values-*/ (density, orientation, night mode, API version,
+# smallest-width, etc.) is NOT a locale — filter it out before hitting the
+# Rosetta table. This is more robust than a blacklist of known non-locale
+# qualifiers because new Android qualifiers ship over time.
+LOCALE_QUALIFIER_RE = /\A(?:[a-z]{2,3})(?:-r[A-Z]{2})?\z|\Ab\+/
+
+def devnotes_play_locales
+  # Scan values-* dirs: the canonical signal for "we ship this language."
+  # (raw-* dirs may lag if devnotes_fetch_inline hasn't been run yet.)
+  # Path is relative to the Fastfile — adjust to your module layout.
+  res_root = File.expand_path("../app/src/main/res", __dir__)
+  qualifiers = Dir.glob(File.join(res_root, "values-*/"))
+    .map { |d| File.basename(d).sub(/\Avalues-/, "") }
+    .select { |q| q.match?(LOCALE_QUALIFIER_RE) }
+
+  qualifiers.map do |q|
+    ANDROID_TO_PLAY_LOCALE[q] || UI.user_error!(
+      "DevNotes: Android qualifier 'values-#{q}' has no ANDROID_TO_PLAY_LOCALE entry. " \
+      "Add a mapping to Fastfile:ANDROID_TO_PLAY_LOCALE — otherwise this locale's " \
+      "Play Store 'What's New' section will silently miss the changelog."
+    )
+  end.tap { |list| list << "en-US" unless list.include?("en-US") }.uniq
+end
+
+lane :deploy_internal do |options|
+  # ... your existing gradle / signing / assemble_release steps ...
+
+  devnotes_write_play_changelogs(
+    project_slug: "byteforge/podcast-guru-android",
+    format_slug:  "play-store-changelog",
+    version_code: android_get_version_code(gradle_file: "app/build.gradle"),
+    locales:      devnotes_play_locales,
+  )
+
+  upload_to_play_store(
+    skip_upload_apk: true,
+    skip_upload_aab: true,   # already uploaded via a prior action
+    # No --skip-metadata / --skip-changelogs: supply picks up
+    # fastlane/metadata/android/<locale>/changelogs/<vc>.txt automatically.
+  )
+end
+```
+
+**Alternative — auto-discovery with `qualifier_overrides:`.** Simpler code but hands "which locales" over to whatever's in `res/raw-*/`. Fine for smaller apps or when the raw-* set is reliably the shipping-languages set:
+
+```ruby
+devnotes_write_play_changelogs(
+  project_slug:        "byteforge/podcast-guru-android",
+  format_slug:         "play-store-changelog",
+  version_code:        android_get_version_code(gradle_file: "app/build.gradle"),
+  qualifier_overrides: {
+    "pt" => "pt-PT",   # disambiguate bare pt
+    "es" => "es-419",  # disambiguate bare es
+    "fa" => "fa",      # add unmapped
+  },
+  strict: true,   # hard-fail if a new unmapped locale slips in
+)
+
+upload_to_play_store(skip_upload_apk: true, skip_upload_aab: true)
+```
+
+### Locale discovery (reference)
+
+Two modes — explicit `locales:` wins outright over auto-discovery:
+
+- **Explicit** (`locales: [...]`): list verbatim. Each entry maps through the built-in BCP 47 → Play Store quirks (see [Play Store locale conventions](#play-store-locale-conventions)) and then through `locale_overrides:`. `res_path` is never inspected. This is the recommended production path — see the recipe above.
+- **Auto-discovery** (default when `locales:` is unset): scans `<res_path>/raw-*/` for directories. Rule order for each qualifier:
+  1. `qualifier_overrides:[qualifier]` if present → use verbatim (v0.6.1+).
+  2. `b+<lang>[+<script>[+<region>]]` (newer form) → BCP 47 identity join.
+  3. `<lang>-r<REGION>` (region-qualified) → `<lang>-<REGION>` (legacy ISO alias translated: iw→he, in→id, ji→yi).
+  4. Bare `<lang>` in `BARE_LANGUAGE_DEFAULTS` (`en`, `ru`, `ko`, `ja`, `de`, `fr`, `it`, `nl`, `pl`, `tr`, `th`, `vi`, `hi`, `ar`, `he`, `id`) → mapped default.
+  5. Bare `<lang>` in `AMBIGUOUS_BARE_LANGUAGES` (`pt`, `zh`, `es`) → hard-fail unless step 1 rescued it.
+  6. Anything else → skip with warning (or hard-fail if `strict: true`).
+
+Bare `raw/` (default qualifier) is skipped with a warning regardless — never inferred as `en-US` because that's wrong for apps whose default language isn't English.
 
 ### Play Store format setup
 
@@ -205,18 +325,22 @@ If the final code isn't in the plugin's known-Play-supported allowlist, the acti
 
 ### Failure modes
 
-| Cause                                              | What you'll see |
-| -------------------------------------------------- | --------------- |
-| Bad `version_code` (non-digit)                     | `version_code must be a positive integer (digits only); got "..."` |
-| Ambiguous bare-language qualifier (`raw-pt`, `raw-zh`, `raw-es`) | `ambiguous bare-language qualifier 'raw-pt' (Brazilian (pt-BR) vs European (pt-PT))…` (hard-fail) |
-| Non-locale Android qualifier (`raw-night`, `raw-v21`, `raw-car`, `raw-mdpi`, …) | warning only — `skipping 'raw-night' — …`; auto-discovery continues |
-| Default `raw/` qualifier discovered                | warning only — bare `raw/` is skipped, action continues with the remaining locales |
-| Per-locale translator can't fit `max_char_length`  | `DevNotes: format 'play-store-changelog' translation to ru-RU could not fit max_char_length=480 (best attempt was 502 chars after 3 tries)…` |
-| Project / release / format / locale not found      | `DevNotes API error: HTTP 404: …` |
-| Auth (`401`) or membership (`403`)                 | `DevNotes API error: HTTP 401/403: …` |
-| Ambiguous bare project slug (`409`)                | `DevNotes: Ambiguous slug …` (same shape as `devnotes_fetch_inline`) |
-| Transient 5xx / network                            | retried up to 6 times; persistent failure aborts with `Gave up after 6 consecutive…` |
-| `timeout` elapsed                                  | `DevNotes API error: Timed out after Ns waiting for job N` |
+| Cause                                              | Severity | What you'll see |
+| -------------------------------------------------- | -------- | --------------- |
+| Bad `version_code` (non-digit)                     | 💥 hard-fail | `version_code must be a positive integer (digits only); got "..."` |
+| Ambiguous bare-language qualifier (`raw-pt`, `raw-zh`, `raw-es`) — no `qualifier_overrides:` entry | 💥 hard-fail | `ambiguous bare-language qualifier 'raw-pt' (Brazilian (pt-BR) vs European (pt-PT))…` — declare the mapping in `qualifier_overrides:` or switch to explicit `locales:`. |
+| **Unmapped bare-language qualifier** (`raw-fa`, `raw-hy`, …) — no `qualifier_overrides:` entry and `strict:` off | ⚠️ **SILENT SKIP** — locale vanishes | `skipping 'raw-fa' — …` — the locale is dropped, no changelog written. Fix with `qualifier_overrides: { "fa" => "fa" }` OR `strict: true` (which turns this into a hard-fail). |
+| Unmapped bare-language qualifier with `strict: true` | 💥 hard-fail | `DevNotes: found 'raw-fa' but no BCP 47 mapping for it, and strict: true is set…` |
+| Non-locale Android qualifier (`raw-night`, `raw-v21`, `raw-car`, `raw-mdpi`, `raw-mcc310`, …) | ⚠️ warning + skip | `skipping 'raw-night' — …`; auto-discovery continues. Never hard-fails, even under `strict:` — these aren't locales. |
+| Bare `raw/` (default qualifier) discovered         | ⚠️ warning + skip | `found '<res_path>/raw/' (default Android qualifier) — skipping.` Add to `locales:` explicitly if wanted. |
+| Per-locale translator can't fit `max_char_length`  | 💥 hard-fail on first offending locale | `DevNotes: format 'play-store-changelog' translation to ru-RU could not fit max_char_length=480 (best attempt was 502 chars after 3 tries)…` |
+| Project / release / format / locale not found      | 💥 hard-fail | `DevNotes API error: HTTP 404: …` |
+| Auth (`401`) or membership (`403`)                 | 💥 hard-fail | `DevNotes API error: HTTP 401/403: …` |
+| Ambiguous bare project slug (`409`)                | 💥 hard-fail | `DevNotes: Ambiguous slug …` (same shape as `devnotes_fetch_inline`) |
+| Transient 5xx / network                            | retry up to 6× | Persistent failure aborts with `Gave up after 6 consecutive…` |
+| `timeout` elapsed                                  | 💥 hard-fail | `DevNotes API error: Timed out after Ns waiting for job N` |
+
+The **⚠️ silent-skip rows are the ones most likely to escape review** and ship a half-localized release. If your app supports pt/zh/es or any non-Latin-script locale, either use explicit `locales:` (the recommended production recipe) or set `strict: true` with a `qualifier_overrides:` map, so a "we forgot to map this new locale" bug can't reach the store.
 
 ### Caveats
 
@@ -370,7 +494,7 @@ Bump the `tag:` in your Pluginfile and run `bundle install`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.6.0"   # ← update tag
+    tag: "v0.6.1"   # ← update tag
 ```
 
 Releases are tagged in this repo; check the [tags](https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes/tags) page for what's available.

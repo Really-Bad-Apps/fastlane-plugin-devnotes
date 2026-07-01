@@ -189,6 +189,117 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
     end
   end
 
+  describe "qualifier_overrides — auto-discovery rescues ambiguous / unmapped" do
+    it "rescues bare 'pt' via qualifier_overrides → auto-discovery works" do
+      # Add raw-pt to the tree — the ambiguous case that would hard-fail
+      # in v0.6.0. With qualifier_overrides declaring pt → pt-PT, the
+      # ambiguity guard is bypassed and auto-discovery completes.
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-pt"))
+
+      stub_happy_path([
+        ["ru-RU", "ru body", true, 1],
+        ["de-DE", "de body", true, 1],
+        ["pt-PT", "pt body", true, 1],
+      ])
+
+      result = call_action(
+        api_url: api_url, api_key: api_key,
+        project_slug: "#{owner}/#{project_slug}",
+        version_code: version_code,
+        qualifier_overrides: { "pt" => "pt-PT" },
+      )
+
+      expect(result[:locales]).to contain_exactly("ru-RU", "de-DE", "pt-PT")
+      pt_path = File.join(@project_root, "fastlane/metadata/android/pt-PT/changelogs/#{version_code}.txt")
+      expect(File.exist?(pt_path)).to be(true)
+    end
+
+    it "writes BOTH raw-pt AND raw-pt-rBR when both exist (region-dedup is gone)" do
+      # v0.6.0 silently dropped raw-pt when raw-pt-rBR existed. v0.6.1
+      # writes both — apps with distinct locale listings depend on this.
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-pt"))
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-pt-rBR"))
+
+      stub_happy_path([
+        ["ru-RU", "ru", true, 1],
+        ["de-DE", "de", true, 1],
+        ["pt-PT", "eu-pt", true, 1],
+        ["pt-BR", "br-pt", true, 1],
+      ])
+
+      result = call_action(
+        api_url: api_url, api_key: api_key,
+        project_slug: "#{owner}/#{project_slug}",
+        version_code: version_code,
+        qualifier_overrides: { "pt" => "pt-PT" },
+      )
+
+      # Both pt-PT AND pt-BR written.
+      expect(result[:locales]).to include("pt-PT", "pt-BR")
+    end
+  end
+
+  describe "strict: true — silent skip becomes hard-fail" do
+    it "hard-fails on an unmapped bare-language qualifier (raw-fa)" do
+      # v0.6.0 silently skipped raw-fa. Under strict, it must abort.
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-fa"))
+
+      stub_happy_path([])
+
+      expect do
+        call_action(
+          api_url: api_url, api_key: api_key,
+          project_slug: "#{owner}/#{project_slug}",
+          version_code: version_code,
+          strict: true,
+        )
+      end.to raise_error(FastlaneCore::Interface::FastlaneError, /raw-fa.*strict/mi)
+    end
+
+    it "still skips MALFORMED qualifiers (raw-night) even under strict" do
+      # raw-night is genuinely not a locale — strict shouldn't turn
+      # ANDROID resource qualifiers into build breakers.
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-night"))
+
+      stub_happy_path([
+        ["ru-RU", "ru", true, 1],
+        ["de-DE", "de", true, 1],
+      ])
+
+      result = call_action(
+        api_url: api_url, api_key: api_key,
+        project_slug: "#{owner}/#{project_slug}",
+        version_code: version_code,
+        strict: true,
+      )
+
+      expect(result[:locales]).to contain_exactly("ru-RU", "de-DE")
+      expect(result[:skipped].map { |s| s[:qualifier] }).to include("raw-night")
+    end
+
+    it "qualifier_overrides + strict together — override wins over strict" do
+      # If the operator explicitly declared a mapping, strict shouldn't
+      # trip because there's no unresolved qualifier.
+      FileUtils.mkdir_p(File.join(@project_root, "app/src/main/res/raw-fa"))
+
+      stub_happy_path([
+        ["ru-RU", "ru", true, 1],
+        ["de-DE", "de", true, 1],
+        ["fa", "fa body", true, 1],
+      ])
+
+      result = call_action(
+        api_url: api_url, api_key: api_key,
+        project_slug: "#{owner}/#{project_slug}",
+        version_code: version_code,
+        qualifier_overrides: { "fa" => "fa" },
+        strict: true,
+      )
+
+      expect(result[:locales]).to include("fa")
+    end
+  end
+
   describe "explicit locales: mode" do
     it "honors the explicit list and skips res scanning" do
       stub_happy_path([
