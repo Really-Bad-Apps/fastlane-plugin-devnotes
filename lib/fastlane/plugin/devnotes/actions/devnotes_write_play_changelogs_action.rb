@@ -203,17 +203,33 @@ module Fastlane
           return []
         end
 
-        # Gather every values-* dir; record bare `values/` as skipped.
+        # Gather every values-* dir. The bare `values/` (default
+        # qualifier) is included ONLY if the operator declared its
+        # mapping in qualifier_overrides via the empty-string key —
+        # `qualifier_overrides: { "" => "en-US", ... }`. Without that
+        # declaration the base is skipped with a warning: the plugin
+        # can't safely infer en-US because the app's default language
+        # might be something else. This is the v0.8.1 fix for the
+        # "auto-discovery drops the primary Play Store listing" bug.
+        base_declared = qualifier_overrides.is_a?(Hash) &&
+                        qualifier_overrides.key?("") &&
+                        !qualifier_overrides[""].to_s.strip.empty?
         qualifiers = []
         Dir.children(res_path).each do |entry|
           full = File.join(res_path, entry)
           next unless File.directory?(full)
           if entry == "values"
-            UI.important(
-              "DevNotes: found '#{res_path}/values/' (default Android qualifier) — skipping. " \
-              "Add the desired locale (e.g. 'en-US') to `locales: [...]` if you want it included."
-            )
-            skipped << { qualifier: "values", reason: "default qualifier — add to locales: explicitly" }
+            if base_declared
+              qualifiers << ""  # feeds through the same mapping pipeline
+            else
+              UI.important(
+                "DevNotes: found '#{res_path}/values/' (default Android qualifier) — skipping. " \
+                "Declare its mapping via `qualifier_overrides: { \"\" => \"en-US\" }` " \
+                "(or your app's actual default) to include it, OR add the desired locale " \
+                "to `locales: [...]` if you're not using auto-discovery."
+              )
+              skipped << { qualifier: "values", reason: "default qualifier — declare qualifier_overrides[''] or add to locales:" }
+            end
             next
           end
           if entry.start_with?("values-")

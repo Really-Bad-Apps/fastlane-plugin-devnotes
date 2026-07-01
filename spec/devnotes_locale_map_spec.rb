@@ -156,6 +156,28 @@ RSpec.describe Fastlane::Helper::DevnotesLocaleMap do
         expect(described_class.qualifier_to_bcp47("ru", overrides: { "ru" => "   " }))
           .to eq("ru-RU")
       end
+
+      it "empty-string qualifier + '' override → returns the mapped locale (v0.8.1)" do
+        # The v0.8.1 fix: the bare `values/` dir is representable in
+        # qualifier_overrides via the empty-string key. Without this
+        # path, auto-discovery drops the default-language listing —
+        # for most localized apps that means en-US silently vanishes.
+        expect(described_class.qualifier_to_bcp47("", overrides: { "" => "en-US" }))
+          .to eq("en-US")
+      end
+
+      it "empty-string qualifier + NO override → raises UnmappableQualifierError (backward-compat)" do
+        # Same as v0.8.0 behavior when the operator hasn't declared "".
+        # The action's caller catches this and either skips (default)
+        # or hard-fails (strict: true).
+        expect { described_class.qualifier_to_bcp47("", overrides: {}) }
+          .to raise_error(described_class::UnmappableQualifierError, /empty/)
+      end
+
+      it "empty-string qualifier + nil overrides → raises (backward-compat)" do
+        expect { described_class.qualifier_to_bcp47("", overrides: nil) }
+          .to raise_error(described_class::UnmappableQualifierError)
+      end
     end
 
     context "malformed qualifier (longer than 3 chars, not a locale shape)" do

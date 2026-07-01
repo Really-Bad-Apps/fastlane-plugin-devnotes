@@ -24,7 +24,7 @@ Add to your project's `fastlane/Pluginfile`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.8.0"
+    tag: "v0.8.1"
 ```
 
 Then:
@@ -34,6 +34,8 @@ bundle install
 ```
 
 > Pin a specific `tag:` for production builds. `branch: "main"` works for testing but is a rolling reference.
+
+> ✨ **What's new in v0.8.1?** Empty-string key in `qualifier_overrides:` now rescues the bare `values/` (default Android qualifier) dir — declare `qualifier_overrides: { "" => "en-US", ... }` and auto-discovery includes your default-language listing (usually en-US) alongside the qualified ones. Without the declaration, `values/` is still skipped with a warning (backward-compatible). Fixes the "auto-discovery drops the primary Play Store listing" case surfaced during the PodcastGuru integration. See [Recommended production recipe](#recommended-production-recipe).
 
 > ⚠️ **BREAKING in v0.8.0 (2026-07-01):** `devnotes_write_play_changelogs` auto-discovery now scans `<res_path>/values-*/` instead of `<res_path>/raw-*/`. The `values-<qualifier>/` tree is the canonical Android "we ship this language" signal — the resource compiler pulls a locale into the AAB iff a `values-<qualifier>/` dir exists for it, so it's the correct source of truth for "what locales does this app support." Auto-discovery from `raw-*/` (v0.6.x default) was a leftover coupling to `devnotes_fetch_inline`'s output and could lag behind the actual shipped-locales set. **Migration:** if your Fastfile passes `locales: [...]` explicitly, no change needed — the explicit path is unchanged. If your Fastfile relied on auto-discovery, verify your `values-*/` set matches what you actually ship (which it should — that's what Android compiles from). Skipping v0.7 in the tag history: v0.7 conceptually would have been the deprecation-warning intermediate release; skipped because current external consumers all use explicit `locales:` and the values-*/ scan Just Works for them.
 
@@ -156,7 +158,7 @@ Fetches a per-locale DevNotes format (e.g. `play-store-changelog` with `max_char
 | `locales`           | `DEVNOTES_PLAY_LOCALES`            | no       | auto-discover from `<res_path>/values-*/` | Explicit BCP 47 list (e.g. `["en-US", "ru-RU"]`). When set, `res_path` is NOT inspected. Use this when you want to ship a subset of your app's locales to Play (e.g. app supports 15 languages but Play Console only has listings for 5). Otherwise the auto-discovery default (values-*/) is the right choice — that's what the AAB itself compiles from. |
 | `res_path`          | `DEVNOTES_PLAY_RES_PATH`           | no       | `app/src/main/res`                  | Root of the Android resource directory (containing the `values-*/` dirs) to scan when auto-discovering locales. Relative paths resolve from the project root. **If your module puts `res/` at the module root (legacy / flat Gradle layout), set this to `"res"` or auto-discovery finds nothing.** |
 | `metadata_path`     | `DEVNOTES_PLAY_METADATA_PATH`      | no       | `fastlane/metadata/android`         | Root of the supply metadata tree. Relative paths resolve from the project root. |
-| `qualifier_overrides` | `DEVNOTES_PLAY_QUALIFIER_OVERRIDES` | no    | `{}`                                | Android resource qualifier → BCP 47 escape hatch, e.g. `{ "pt" => "pt-PT", "es" => "es-419", "fa" => "fa" }`. Consulted BEFORE any built-in rule inside `qualifier_to_bcp47`, so this rescues ambiguous bare-languages (pt/zh/es — otherwise hard-fail) AND unmapped bare-languages (fa, hy, … — otherwise silently skip). Auto-discovery only; ignored when `locales:` is set. |
+| `qualifier_overrides` | `DEVNOTES_PLAY_QUALIFIER_OVERRIDES` | no    | `{}`                                | Android resource qualifier → BCP 47 escape hatch, e.g. `{ "" => "en-US", "pt" => "pt-PT", "es" => "es-419", "fa" => "fa" }`. Consulted BEFORE any built-in rule inside `qualifier_to_bcp47`, so this rescues (a) the bare `values/` (default qualifier) dir via the **empty-string key `""`** — otherwise auto-discovery skips it and your default-language Play Store listing drops from the release; (b) ambiguous bare-languages (pt/zh/es — otherwise hard-fail); (c) unmapped bare-languages (fa, hy, … — otherwise silently skip). Auto-discovery only; ignored when `locales:` is set. |
 | `strict`            | `DEVNOTES_PLAY_STRICT`             | no       | `false`                             | When `true`, an unmapped bare-language qualifier hard-fails the build instead of skipping with a warning. Genuine non-locale qualifiers (`values-night`, `values-v21`, `values-mdpi`, `values-w720dp`) still skip regardless. **Recommended for production**: a language you ship should never vanish from a release just because someone added a new `values-<lang>/` dir the plugin doesn't know about. |
 | `locale_overrides`  | `DEVNOTES_PLAY_LOCALE_OVERRIDES`   | no       | `{}`                                | BCP 47 → Play Store metadata code rewrites (e.g. `{ "es-419" => "es-MX" }` to override the default Spanish collapse). Applied AFTER `qualifier_to_bcp47`. **This CANNOT rescue an ambiguous bare-language** (`values-pt`, `values-zh`, `values-es`) — that path raises inside `qualifier_to_bcp47` before `locale_overrides` is consulted. Use `qualifier_overrides:` for that case. |
 | `poll_interval`     | `DEVNOTES_POLL_INTERVAL`           | no       | `10`                                | Seconds between job-status polls. |
@@ -180,7 +182,7 @@ Auto-discovery scans `<res_path>/values-*/` for directories and maps each Androi
 | --- | --- | --- |
 | **Ambiguous bare-language** — `values-pt` / `values-zh` / `values-es`. Legit locale attempts but incomplete (BR vs PT, CN vs TW vs HK, ES vs 419 vs MX). | 💥 hard-fail with a clear error | Declare the intended mapping in `qualifier_overrides: { "pt" => "pt-PT", ... }` — that check runs BEFORE the ambiguity guard. |
 | **Unmapped bare-language** — `values-fa` (Farsi), `values-hy` (Armenian), any language not in the built-in `BARE_LANGUAGE_DEFAULTS` table. | ⚠️ **SILENTLY SKIPPED** with a `UI.important` warning. A locale you ship simply vanishes from the release. **This is the failure mode most likely to escape review** — set `strict: true` for production. | `strict: true` turns this into a hard-fail; OR declare it in `qualifier_overrides` and it maps through normally. |
-| **`values/` bare (default qualifier)** — Android's "no qualifier" bucket. May or may not be your default English. | ⚠️ silently skipped with warning | Add to `locales:` explicitly if you want that locale. The plugin doesn't guess — inferring `en-US` is wrong for apps whose default language isn't English. |
+| **`values/` bare (default qualifier)** — Android's "no qualifier" bucket. Represents your app's default language (usually en-US, but the plugin can't safely guess). | ⚠️ silently skipped with warning UNLESS `qualifier_overrides: { "" => "en-US" }` is declared. | Declare the mapping via `qualifier_overrides[""]` (v0.8.1+) to include the default-language listing in auto-discovery. Or add explicitly to `locales:` if not using auto-discovery. |
 | **Non-locale Android qualifier** — `values-night`, `values-v21`, `values-w720dp`, `values-mdpi`, `values-port`, `values-mcc310`, etc. These are UI mode, API version, screen size, density, orientation, MCC modifiers, not locales. Every real Android project has some of these. | ✅ skipped with warning (correct behavior) | No action needed. `strict:` does NOT turn these into failures — they're legitimately not locales. |
 
 Additionally:
@@ -213,6 +215,10 @@ lane :deploy_internal do |options|
     #     need to declare the mapping to actually ship the locale)
     #   - Divergent regional dialects (es-rES vs es-r419, pt-rBR vs pt-rPT)
     qualifier_overrides: {
+      ""       => "en-US",     # bare `values/` — your app's default language.
+                               # Without this line auto-discovery SKIPS the
+                               # default-language listing and you ship every
+                               # non-default locale but silently omit en-US.
       "pt"     => "pt-PT",     # bare = European (or "pt-BR" — your call)
       "pt-rBR" => "pt-BR",
       "es"     => "es-419",    # bare = Latin America
@@ -259,7 +265,7 @@ Two modes — explicit `locales:` wins outright over auto-discovery:
 
 - **Explicit** (`locales: [...]`): list verbatim. Each entry maps through the built-in BCP 47 → Play Store quirks (see [Play Store locale conventions](#play-store-locale-conventions)) and then through `locale_overrides:`. `res_path` is never inspected.
 - **Auto-discovery** (default when `locales:` is unset): scans `<res_path>/values-*/` for directories. Rule order for each qualifier:
-  1. `qualifier_overrides:[qualifier]` if present → use verbatim.
+  1. `qualifier_overrides:[qualifier]` if present → use verbatim. The empty-string key `""` maps the bare `values/` dir (v0.8.1+).
   2. `b+<lang>[+<script>[+<region>]]` (newer form) → BCP 47 identity join.
   3. `<lang>-r<REGION>` (region-qualified) → `<lang>-<REGION>` (legacy ISO alias translated: iw→he, in→id, ji→yi).
   4. Bare `<lang>` in `BARE_LANGUAGE_DEFAULTS` (`en`, `ru`, `ko`, `ja`, `de`, `fr`, `it`, `nl`, `pl`, `tr`, `th`, `vi`, `hi`, `ar`, `he`, `id`) → mapped default.
@@ -304,7 +310,7 @@ If the final code isn't in the plugin's known-Play-supported allowlist, the acti
 | **Unmapped bare-language qualifier** (`values-fa`, `values-hy`, …) — no `qualifier_overrides:` entry and `strict:` off | ⚠️ **SILENT SKIP** — locale vanishes | `skipping 'values-fa' — …` — the locale is dropped, no changelog written. Fix with `qualifier_overrides: { "fa" => "fa" }` OR `strict: true` (which turns this into a hard-fail). |
 | Unmapped bare-language qualifier with `strict: true` | 💥 hard-fail | `DevNotes: found 'values-fa' but no BCP 47 mapping for it, and strict: true is set…` |
 | Non-locale Android qualifier (`values-night`, `values-v21`, `values-w720dp`, `values-mdpi`, `values-mcc310`, …) | ⚠️ warning + skip | `skipping 'values-night' — …`; auto-discovery continues. Never hard-fails, even under `strict:` — these aren't locales. |
-| Bare `values/` (default qualifier) discovered      | ⚠️ warning + skip | `found '<res_path>/values/' (default Android qualifier) — skipping.` Add to `locales:` explicitly if wanted. |
+| Bare `values/` (default qualifier) discovered, no `qualifier_overrides[""]` set | ⚠️ warning + skip | `found '<res_path>/values/' (default Android qualifier) — skipping. Declare its mapping via qualifier_overrides: { "" => "en-US" } … or add the desired locale to locales:.` — v0.8.1+ lets you include it in auto-discovery. |
 | Per-locale translator can't fit `max_char_length`  | 💥 hard-fail on first offending locale | `DevNotes: format 'play-store-changelog' translation to ru-RU could not fit max_char_length=480 (best attempt was 502 chars after 3 tries)…` |
 | Project / release / format / locale not found      | 💥 hard-fail | `DevNotes API error: HTTP 404: …` |
 | Auth (`401`) or membership (`403`)                 | 💥 hard-fail | `DevNotes API error: HTTP 401/403: …` |
@@ -466,7 +472,7 @@ Bump the `tag:` in your Pluginfile and run `bundle install`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.8.0"   # ← update tag
+    tag: "v0.8.1"   # ← update tag
 ```
 
 Releases are tagged in this repo; check the [tags](https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes/tags) page for what's available.

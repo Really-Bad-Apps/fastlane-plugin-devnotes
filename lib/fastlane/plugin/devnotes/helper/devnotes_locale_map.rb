@@ -127,24 +127,31 @@ module Fastlane
         raise DefaultQualifierError, "bare raw/ qualifier" if qualifier.nil?
 
         normalized = qualifier.to_s.strip
-        raise UnmappableQualifierError.new(qualifier, "empty qualifier") if normalized.empty?
 
         # Operator's Rosetta table wins over every built-in rule. This
         # is what makes the ambiguous (pt/zh/es) hard-fail path
         # configurable — the AMBIGUOUS raise below is unreachable when
         # the operator has already declared a decision for that
         # qualifier. Same for unmapped bare-languages (fa, hy, …).
-        # Empty / whitespace-only override values fall through so a
-        # typo like `{ "pt" => "" }` doesn't silently ship a blank
-        # locale — the downstream ArgumentError isn't caught by the
-        # action's rescue chain, better to just ignore the entry and
-        # surface the fall-through error path.
+        # AND for the empty-string case — an entry `{ "" => "en-US" }`
+        # rescues the bare `values/` (default qualifier) dir that
+        # build_pairs_from_res_path would otherwise skip. Empty /
+        # whitespace-only override values fall through so a typo like
+        # `{ "pt" => "" }` doesn't silently ship a blank locale — the
+        # downstream ArgumentError isn't caught by the action's rescue
+        # chain, better to just ignore the entry and surface the
+        # fall-through error path.
         if overrides
           override_value = overrides[normalized]
           if override_value && !override_value.to_s.strip.empty?
             return override_value.to_s
           end
         end
+
+        # Empty qualifier with no override → raise. Non-empty qualifier
+        # can't reach this line (normalized was checked non-empty by the
+        # regex-based dispatch below on the qualifier's own content).
+        raise UnmappableQualifierError.new(qualifier, "empty qualifier") if normalized.empty?
 
         # Newer BCP 47 form: b+lang[+script[+region]]
         if normalized.start_with?("b+")

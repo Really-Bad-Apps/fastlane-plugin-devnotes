@@ -190,6 +190,49 @@ RSpec.describe Fastlane::Actions::DevnotesWritePlayChangelogsAction do
     end
   end
 
+  describe "qualifier_overrides[''] — base values/ dir (v0.8.1)" do
+    it "includes the default-language listing when '' is declared" do
+      # Every real Android project has values/ (the default qualifier).
+      # In v0.8.0 that dir was ALWAYS skipped with a warning, so
+      # auto-discovery dropped the primary Play Store listing (usually
+      # en-US). v0.8.1 lets the operator declare the mapping.
+      stub_happy_path([
+        ["en-US", "en body", false, nil],
+        ["ru-RU", "ru body", true, 1],
+        ["de-DE", "de body", true, 1],
+      ])
+
+      result = call_action(
+        api_url: api_url, api_key: api_key,
+        project_slug: "#{owner}/#{project_slug}",
+        version_code: version_code,
+        qualifier_overrides: { "" => "en-US" },
+      )
+
+      expect(result[:locales]).to contain_exactly("en-US", "ru-RU", "de-DE")
+      en_path = File.join(@project_root, "fastlane/metadata/android/en-US/changelogs/#{version_code}.txt")
+      expect(File.exist?(en_path)).to be(true)
+      expect(File.read(en_path)).to eq("en body")
+    end
+
+    it "still skips bare values/ when '' is NOT declared (backward-compat)" do
+      # v0.8.0 behavior stays the default — no silent en-US inference.
+      stub_happy_path([
+        ["ru-RU", "ru body", true, 1],
+        ["de-DE", "de body", true, 1],
+      ])
+
+      result = call_action(
+        api_url: api_url, api_key: api_key,
+        project_slug: "#{owner}/#{project_slug}",
+        version_code: version_code,
+      )
+
+      expect(result[:locales]).to contain_exactly("ru-RU", "de-DE")
+      expect(result[:skipped].map { |s| s[:qualifier] }).to include("values")
+    end
+  end
+
   describe "qualifier_overrides — auto-discovery rescues ambiguous / unmapped" do
     it "rescues bare 'pt' via qualifier_overrides → auto-discovery works" do
       # Add values-pt to the tree — the ambiguous case that would hard-fail
