@@ -73,6 +73,21 @@ module Fastlane
         job
       end
 
+      # Return only a validated completed release, so callers cannot accidentally
+      # fetch a different release or proceed after a failed generation.
+      def self.generate_release(client, owner_username, project_slug, release_name, from_tag)
+        job = submit_and_wait(client, owner_username, project_slug, release_name, from_tag)
+        result = job["result_data"]
+        release_id = result["release_id"] if result.is_a?(Hash)
+        unless job["status"] == "completed" && release_id.is_a?(Integer) && release_id.positive?
+          UI.user_error!(
+            "Job #{job['id']} did not return a completed release with a valid result_data.release_id " \
+            "(status=#{job['status'].inspect}, release_id=#{release_id.inspect})."
+          )
+        end
+        release_id
+      end
+
       # "Both set" is enforced by ConfigItem's conflicting_options. This
       # only checks the "neither set" case, which fastlane doesn't model.
       def self.require_project_identifier(params)

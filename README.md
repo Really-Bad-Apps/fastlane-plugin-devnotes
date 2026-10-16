@@ -1,5 +1,9 @@
 # fastlane-plugin-devnotes
 
+Version 0.9.0 adds `devnotes_resolve_release` and explicit `release_id:`
+reuse. Generate once before the locale loop, then pass that ID to both fetch
+actions to avoid repeated generation jobs and completion notifications.
+
 Version 0.8.2 adds polling for asynchronous format and translation jobs (HTTP 202),
 while preserving immediate cached responses (HTTP 200). Applies to both actions.
 
@@ -27,7 +31,7 @@ Add to your project's `fastlane/Pluginfile`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.8.1"
+    tag: "v0.9.0"
 ```
 
 Then:
@@ -94,11 +98,19 @@ Combine `devnotes_fetch_inline` (per locale, populates the in-app `res/raw-*/rno
 lane :release do |options|
   locales = ["en-US", "ru-RU", "es-MX", "pt-BR", "de-DE"]
 
+  # Requires v0.9.0. Generate once; reuse this snapshot for every output.
+  release_id = devnotes_resolve_release(
+    project_slug: "byteforge/podcast-guru-android",
+    release_name: options[:version_name],
+    timeout: 1200
+  )
+
   # 1. In-app HTML release notes — one rnotes.txt per Android resource qualifier
   locales.each do |loc|
     qual = loc == "en-US" ? "raw" : "raw-#{loc.sub(/-([A-Z]{2})$/) { "-r#{$1}" }}"
     devnotes_fetch_inline(
       project_slug: "byteforge/podcast-guru-android",
+      release_id: release_id,
       locale:       loc == "en-US" ? nil : loc,
       output_path:  "app/src/main/res/#{qual}/rnotes.txt",
     )
@@ -107,9 +119,10 @@ lane :release do |options|
   # 2. Play Store changelogs — one file per Play Store metadata locale
   devnotes_write_play_changelogs(
     project_slug: "byteforge/podcast-guru-android",
+    release_id: release_id,
     format_slug:  "play-store-changelog",
     version_code: android_get_version_code(...),
-    # locales: auto-discovered from res/raw-*/ above
+    # locales: auto-discovered from res/values-*/
   )
 
   # 3. Build + upload
@@ -122,9 +135,27 @@ The Play Store format must be defined in the DevNotes UI for your project before
 
 ---
 
+## Action: `devnotes_resolve_release`
+
+Requires v0.9.0. Submit one generation job and return its completed release ID
+as a positive integer. Accepts `api_url`, `api_key`, `project_slug` (or deprecated
+`project_name`), `release_name`, `from_tag`, `poll_interval`, and `timeout`, with
+the same defaults as `devnotes_fetch_inline`. If release_name is omitted, uses
+the last Git tag. Generation failures stop the lane.
+
+Pass the returned ID explicitly to both fetch actions. With `release_id:`, they
+skip generation and Git-tag lookup; project authorization and format fetching
+still run normally, including HTTP 202 polling. Do not also pass `release_name`
+or `from_tag` (including their environment variables). An invalid or inaccessible
+release fails; it never silently triggers another generation.
+
+Call the resolver again for a new build, even if the release name is unchanged.
+There is no process-wide or cross-build cache. Existing calls without
+`release_id:` keep their generate-then-fetch behavior.
+
 ## Action: `devnotes_fetch_inline`
 
-Submits a release-notes generation job, polls until it completes, then lazily fetches the chosen format's output and writes the bytes to `output_path`. Hard-fails the lane on any unrecoverable error.
+With `release_id:`, fetches that existing release; otherwise submits a generation job and polls until completion. Lazily fetches the chosen format's output and writes the bytes to `output_path`. Hard-fails the lane on any unrecoverable error.
 
 | Option           | Env var                   | Required             | Default                                   | Notes |
 | ---------------- | ------------------------- | -------------------- | ----------------------------------------- | ----- |
@@ -136,6 +167,7 @@ Submits a release-notes generation job, polls until it completes, then lazily fe
 | `locale`         | `DEVNOTES_LOCALE`         | no                   | —                                         | Optional BCP 47 tag (e.g. `"es-MX"`, `"ru-RU"`) requesting a translated format output. Omitted or `"en-*"` returns source English. See [Translations](#translations) for multi-locale build patterns and the `max_char_length` failure mode. |
 | `release_name`   | `DEVNOTES_RELEASE_NAME`   | no                   | `last_git_tag`                            | E.g. `"2.3.0-beta1"`. Identifies the release to generate notes for. |
 | `from_tag`       | `DEVNOTES_FROM_TAG`       | no                   | auto-detected from production store       | Git tag to diff from. Leave unset to let DevNotes resolve. |
+| `release_id` | — | no | — | Positive ID returned by `devnotes_resolve_release`; skips generation. Conflicts with `release_name` and `from_tag`. |
 | `output_path`    | `DEVNOTES_OUTPUT_PATH`    | no                   | `app/src/main/res/raw/rnotes.txt`         | Relative paths resolve against the **project root** (parent of `fastlane/`). Absolute paths are honoured as-is. |
 | `poll_interval`  | `DEVNOTES_POLL_INTERVAL`  | no                   | `10`                                      | Seconds between job-status polls. Must be > 0. |
 | `timeout`        | `DEVNOTES_TIMEOUT`        | no                   | `600`                                     | Seconds allowed for release generation and, separately, each format/locale fetch. Must be > 0. |
@@ -156,6 +188,7 @@ Fetches a per-locale DevNotes format (e.g. `play-store-changelog` with `max_char
 | `project_name`      | `DEVNOTES_PROJECT_NAME`            | one of these two | —                          | Deprecated; same sunset as `devnotes_fetch_inline`. |
 | `release_name`      | `DEVNOTES_RELEASE_NAME`            | no       | `last_git_tag`                      | E.g. `"2.3.0-beta1"`. |
 | `from_tag`          | `DEVNOTES_FROM_TAG`                | no       | auto-detected from prod store       | Git tag to diff from. |
+| `release_id` | — | no | — | Positive ID returned by `devnotes_resolve_release`; skips generation. Conflicts with `release_name` and `from_tag`. |
 | `format_slug`       | `DEVNOTES_PLAY_FORMAT_SLUG`        | no       | `"play-store-changelog"`            | The DevNotes format to fetch per locale. Define it in the DevNotes UI with `max_char_length=480` and a plain-text + emoji prompt — see [Play Store format setup](#play-store-format-setup). |
 | `version_code`      | `DEVNOTES_PLAY_VERSION_CODE`       | **yes**  | —                                   | The Android `versionCode` the changelog attaches to. Integer or String of digits. Must match the build supply uploads or the changelog attaches to the wrong build. |
 | `locales`           | `DEVNOTES_PLAY_LOCALES`            | no       | auto-discover from `<res_path>/values-*/` | Explicit BCP 47 list (e.g. `["en-US", "ru-RU"]`). When set, `res_path` is NOT inspected. Use this when you want to ship a subset of your app's locales to Play (e.g. app supports 15 languages but Play Console only has listings for 5). Otherwise the auto-discovery default (values-*/) is the right choice — that's what the AAB itself compiles from. |
@@ -325,7 +358,7 @@ The **⚠️ silent-skip rows are the ones most likely to escape review** and sh
 
 ### Caveats
 
-- **Two job submissions per lane.** Running both `devnotes_fetch_inline` (per locale) and `devnotes_write_play_changelogs` in the same lane submits two separate generation jobs to the DevNotes API. The backend's `(format_id, commit_hash, model, prompt_hash)` cache short-circuits the LLM, but each job still costs one round-trip (typically under a second on a cache hit). A future v0.7 candidate — a `devnotes_resolve_release` action that exposes the resolved `release_id` via lane context — would let both fetch actions share a single submission. Not in v0.6.
+- **Generation is per action call unless a release ID is supplied.** A loop of 16 inline calls plus the Play action otherwise submits 17 jobs. Backend format caching does not skip generation orchestration or completion notifications. Use the generate-once recipe above.
 - **`version_code` must match the build supply uploads.** The action writes the changelog file under `changelogs/<version_code>.txt`. If `supply` uploads a different `versionCode`, the changelog attaches to the wrong build. Read `version_code` from the same source supply uses (typically `android_get_version_code` against the AAB).
 - **First per-locale error aborts the run.** Files for already-fetched locales remain on disk — the next CI run rewrites them. No partial-success reporting.
 
@@ -390,9 +423,14 @@ DevNotes: wrote 1234 bytes (text/html, translated to ru-RU in 2 attempts) to /�
 
 #### Multi-locale builds
 
-The plugin does **not** auto-embed the locale into `output_path` — Android apps read fixed resource paths, so changing the filename per locale would break the consumer side. Instead, invoke the action once per locale with matching Android resource qualifier directories:
+The plugin does **not** auto-embed the locale into `output_path` — Android apps read fixed resource paths, so changing the filename per locale would break the consumer side. Resolve the release once (v0.9.0), then invoke the fetch action once per locale with that ID and matching Android resource qualifier directories:
 
 ```ruby
+release_id = devnotes_resolve_release(
+  project_slug: "byteforge/podcast-guru-android",
+  release_name: "2.3.4-beta1",
+  timeout: 1200
+)
 [
   { locale: nil,     path: "app/src/main/res/raw/rnotes.txt"     },  # default (en)
   { locale: "ru-RU", path: "app/src/main/res/raw-ru/rnotes.txt"  },
@@ -400,6 +438,7 @@ The plugin does **not** auto-embed the locale into `output_path` — Android app
 ].each do |c|
   devnotes_fetch_inline(
     project_slug: "byteforge/podcast-guru-android",
+    release_id: release_id,
     format_slug:  "mobile-html",
     locale:       c[:locale],
     output_path:  c[:path],
@@ -476,7 +515,7 @@ Bump the `tag:` in your Pluginfile and run `bundle install`:
 ```ruby
 gem "fastlane-plugin-devnotes",
     git: "https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes.git",
-    tag: "v0.8.1"   # ← update tag
+    tag: "v0.9.0"   # ← update tag
 ```
 
 Releases are tagged in this repo; check the [tags](https://github.com/Really-Bad-Apps/fastlane-plugin-devnotes/tags) page for what's available.

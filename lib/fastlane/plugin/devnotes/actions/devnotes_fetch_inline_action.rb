@@ -16,7 +16,7 @@ module Fastlane
       def self.run(params)
         Helper::DevnotesActionMixin.require_project_identifier(params)
 
-        release_name = Helper::DevnotesActionMixin.resolve_release_name(params)
+        release_name = params[:release_id] ? nil : Helper::DevnotesActionMixin.resolve_release_name(params)
         output_path = File.expand_path(params[:output_path], Helper::DevnotesActionMixin.project_root)
         validate_res_raw_filename(output_path)
 
@@ -44,19 +44,12 @@ module Fastlane
         end
         UI.message(
           "DevNotes: project=#{owner_username}/#{project_slug_value} (id=#{project_id}) " \
-          "release_name=#{release_name} format_slug=#{format_slug}"
+          "release=#{params[:release_id] || release_name} format_slug=#{format_slug}"
         )
 
-        job = Helper::DevnotesActionMixin.submit_and_wait(client, owner_username, project_slug_value, release_name, params[:from_tag])
-
-        release_id = (job["result_data"] || {})["release_id"]
-        unless release_id.is_a?(Integer) && release_id.positive?
-          UI.user_error!(
-            "Job #{job['id']} completed but result_data.release_id is missing or invalid " \
-            "(got #{release_id.inspect}). This usually means the DevNotes backend is older " \
-            "than v89 (the formats redesign); upgrade the backend and retry."
-          )
-        end
+        release_id = params[:release_id] || Helper::DevnotesActionMixin.generate_release(
+          client, owner_username, project_slug_value, release_name, params[:from_tag]
+        )
 
         locale = params[:locale].to_s.strip
         locale = nil if locale.empty?
@@ -146,7 +139,8 @@ module Fastlane
 
       def self.details
         <<~DETAILS
-          Submits a release-notes generation job to the DevNotes API, polls
+          With release_id, fetches that release without submitting a generation job.
+          Otherwise submits a release-notes generation job to the DevNotes API, polls
           until it completes, then lazily fetches the chosen format's output
           for that release and writes it to the given path. Intended to run
           before `gradle assembleRelease` so the notes are bundled as an
@@ -236,6 +230,16 @@ module Fastlane
             ),
             optional: true,
             type: String
+          ),
+          FastlaneCore::ConfigItem.new(
+            key: :release_id,
+            description: "Existing release ID from devnotes_resolve_release; skips generation",
+            optional: true,
+            type: Integer,
+            conflicting_options: [:release_name, :from_tag],
+            verify_block: proc do |value|
+              UI.user_error!("release_id must be a positive integer") unless value.is_a?(Integer) && value.positive?
+            end
           ),
           FastlaneCore::ConfigItem.new(
             key: :release_name,

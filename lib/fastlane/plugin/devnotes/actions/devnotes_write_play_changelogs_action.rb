@@ -37,7 +37,7 @@ module Fastlane
         format_slug = params[:format_slug].to_s.strip
         UI.user_error!("format_slug must not be empty") if format_slug.empty?
 
-        release_name = Helper::DevnotesActionMixin.resolve_release_name(params)
+        release_name = params[:release_id] ? nil : Helper::DevnotesActionMixin.resolve_release_name(params)
         project_root = Helper::DevnotesActionMixin.project_root
         metadata_path = File.expand_path(params[:metadata_path], project_root)
         overrides = params[:locale_overrides] || {}
@@ -61,20 +61,12 @@ module Fastlane
         end
         UI.message(
           "DevNotes: project=#{owner_username}/#{project_slug_value} (id=#{project_id}) " \
-          "release_name=#{release_name} format_slug=#{format_slug} version_code=#{version_code}"
+          "release=#{params[:release_id] || release_name} format_slug=#{format_slug} version_code=#{version_code}"
         )
 
-        job = Helper::DevnotesActionMixin.submit_and_wait(
+        release_id = params[:release_id] || Helper::DevnotesActionMixin.generate_release(
           client, owner_username, project_slug_value, release_name, params[:from_tag]
         )
-        release_id = (job["result_data"] || {})["release_id"]
-        unless release_id.is_a?(Integer) && release_id.positive?
-          UI.user_error!(
-            "Job #{job['id']} completed but result_data.release_id is missing or invalid " \
-            "(got #{release_id.inspect}). This usually means the DevNotes backend is older " \
-            "than v89 (the formats redesign); upgrade the backend and retry."
-          )
-        end
 
         # Build the (bcp47, play_store_locale) pair list. Two discovery
         # modes: explicit `locales:` arg wins outright; otherwise scan
@@ -375,6 +367,16 @@ module Fastlane
             optional: true,
             conflicting_options: [:project_slug],
             type: String
+          ),
+          FastlaneCore::ConfigItem.new(
+            key: :release_id,
+            description: "Existing release ID from devnotes_resolve_release; skips generation",
+            optional: true,
+            type: Integer,
+            conflicting_options: [:release_name, :from_tag],
+            verify_block: proc do |value|
+              UI.user_error!("release_id must be a positive integer") unless value.is_a?(Integer) && value.positive?
+            end
           ),
           FastlaneCore::ConfigItem.new(
             key: :release_name,
