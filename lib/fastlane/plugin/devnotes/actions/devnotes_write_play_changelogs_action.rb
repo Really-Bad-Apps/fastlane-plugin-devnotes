@@ -508,7 +508,7 @@ module Fastlane
           FastlaneCore::ConfigItem.new(
             key: :timeout,
             env_name: "DEVNOTES_TIMEOUT",
-            description: "Total seconds to wait for generation before failing",
+            description: "Seconds allowed for release generation and separately each format/locale fetch",
             optional: true,
             default_value: 600,
             type: Integer

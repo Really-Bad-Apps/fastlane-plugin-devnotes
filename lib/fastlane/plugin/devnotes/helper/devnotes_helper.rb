@@ -2,6 +2,7 @@ require "net/http"
 require "uri"
 require "json"
 require "openssl"
+require "timeout"
 
 module Fastlane
   module Helper
@@ -61,6 +62,11 @@ module Fastlane
           @locale = locale
         end
       end
+
+      # Separate from Net::ReadTimeout so the retry loop cannot swallow the
+      # overall format deadline (which also includes requests and retry sleeps).
+      class FormatWaitTimeout < StandardError; end
+      private_constant :FormatWaitTimeout
 
       MAX_CONSECUTIVE_TRANSIENT_ERRORS = 6
       OPEN_TIMEOUT_SECONDS = 30
@@ -123,7 +129,21 @@ module Fastlane
         path = "/api/projects/#{path_segment(owner_username)}/#{path_segment(project_slug)}" \
                "/releases/#{path_segment(release_id)}/formats/#{path_segment(format_slug)}"
         path += "?locale=#{path_segment(locale)}" if locale && !locale.to_s.strip.empty?
-        with_transient_retry { get(path) }
+        job_id = nil
+        Timeout.timeout(@timeout, FormatWaitTimeout) do
+          code, output = with_transient_retry { get(path, with_status: true) }
+          return output if code == 200
+          unless code == 202 && output["job_id"].is_a?(String) &&
+                 output["job_id"].match?(/\A[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i)
+            raise ApiError.new("Invalid format-job submission response (HTTP #{code})")
+          end
+
+          job_id = output["job_id"]
+          poll_format_output(job_id)
+        end
+      rescue FormatWaitTimeout
+        target = job_id ? "format job #{job_id}" : "format '#{format_slug}'"
+        raise ApiError.new("Timed out after #{@timeout}s waiting for #{target}")
       end
 
       def submit_generation_job(owner_username:, project_slug:, release_name:, from_tag: nil)
@@ -163,8 +183,39 @@ module Fastlane
 
       private
 
-      def get(path)
-        request(Net::HTTP::Get.new(uri_for(path).request_uri))
+      def poll_format_output(job_id)
+        # Construct the authenticated poll URL ourselves: never send the API
+        # key to an arbitrary Location supplied by a response.
+        with_persistent_session do
+          loop do
+            job = with_transient_retry { get("/api/format-jobs/#{job_id}") }
+            case job["status"]
+            when "completed"
+              result = job["result"]
+              unless result.is_a?(Hash) && result["content"].is_a?(String) && !result["content"].empty?
+                raise ApiError.new("Format job #{job_id} completed without content")
+              end
+              return result
+            when "failed"
+              # A terminal job failure is not a transient HTTP failure. Do not
+              # resubmit generation, even when the embedded error code is 5xx.
+              error = job["error"]
+              unless error.is_a?(Hash) && error["code"].is_a?(Integer) && error["message"].is_a?(String)
+                raise ApiError.new("Format job #{job_id} failed without valid error details")
+              end
+              raise_translation_fit_error(error) if error["code"] == 422
+              raise ApiError.new("Format job #{job_id} failed: #{error['message']}", code: error["code"])
+            when "pending", "processing"
+              sleep(@poll_interval)
+            else
+              raise ApiError.new("Format job #{job_id} returned unknown status #{job['status'].inspect}")
+            end
+          end
+        end
+      end
+
+      def get(path, with_status: false)
+        request(Net::HTTP::Get.new(uri_for(path).request_uri), with_status: with_status)
       end
 
       def post(path, body)
@@ -174,13 +225,16 @@ module Fastlane
         request(req)
       end
 
-      def request(req)
+      def request(req, with_status: false)
         req["Authorization"] = "Bearer #{@api_key}"
         req["Accept"] = "application/json"
 
         response = perform_request(req)
         code = response.code.to_i
-        return parse_body(response) if code >= 200 && code < 300
+        if code >= 200 && code < 300
+          body = parse_body(response)
+          return with_status ? [code, body] : body
+        end
 
         # Detect the slug-ambiguity 409: GET /api/projects/by-slug/<slug>
         # returns a candidates array when more than one accessible project
@@ -201,24 +255,23 @@ module Fastlane
         # fields when the translator can't fit max_char_length after the
         # retry budget. Other 422s (e.g. unknown prompt-template variable)
         # don't carry these fields and fall through to generic ApiError.
-        if code == 422
-          parsed = parse_error_json(response)
-          if parsed.is_a?(Hash) &&
-             parsed["attempts"].is_a?(Integer) &&
-             parsed["best_length"].is_a?(Integer) &&
-             parsed["max_char_length"].is_a?(Integer) &&
-             parsed["locale"].is_a?(String)
-            raise TranslationFitError.new(
-              parsed["message"] || "Translation cannot fit max_char_length",
-              attempts: parsed["attempts"],
-              best_length: parsed["best_length"],
-              max_char_length: parsed["max_char_length"],
-              locale: parsed["locale"]
-            )
-          end
-        end
+        raise_translation_fit_error(parse_error_json(response)) if code == 422
 
         raise ApiError.new("HTTP #{code}: #{extract_error_message(response)}", code: code)
+      end
+
+      def raise_translation_fit_error(parsed)
+        return unless parsed.is_a?(Hash) &&
+                      parsed["attempts"].is_a?(Integer) &&
+                      parsed["best_length"].is_a?(Integer) &&
+                      parsed["max_char_length"].is_a?(Integer) &&
+                      parsed["locale"].is_a?(String)
+
+        raise TranslationFitError.new(
+          parsed["message"] || "Translation cannot fit max_char_length",
+          attempts: parsed["attempts"], best_length: parsed["best_length"],
+          max_char_length: parsed["max_char_length"], locale: parsed["locale"]
+        )
       end
 
       # Best-effort JSON parse of an error response body; returns nil on
@@ -262,19 +315,23 @@ module Fastlane
       # polls; if the server closes its end, perform_request falls back
       # to a fresh connection.
       def with_persistent_session
-        Net::HTTP.start(
-          @base_uri.host,
-          @base_uri.port,
-          use_ssl: @base_uri.scheme == "https",
-          open_timeout: OPEN_TIMEOUT_SECONDS,
-          read_timeout: READ_TIMEOUT_SECONDS,
-          keep_alive_timeout: @poll_interval * 2
-        ) do |http|
-          @http = http
-          yield
+        # Retry connection setup only. Retrying the whole yielded block would
+        # incorrectly retry terminal format-job failures carrying a 5xx code.
+        http = with_transient_retry do
+          Net::HTTP.start(
+            @base_uri.host,
+            @base_uri.port,
+            use_ssl: @base_uri.scheme == "https",
+            open_timeout: OPEN_TIMEOUT_SECONDS,
+            read_timeout: READ_TIMEOUT_SECONDS,
+            keep_alive_timeout: @poll_interval * 2
+          )
         end
+        @http = http
+        yield
       ensure
         @http = nil
+        http.finish if http && http.started?
       end
 
       # Wrap a block in fail-fast-on-4xx/contract-error, retry-on-5xx-or-network
@@ -297,7 +354,8 @@ module Fastlane
           end
           sleep(@poll_interval)
           retry
-        rescue SocketError, Net::OpenTimeout, Net::ReadTimeout, IOError, OpenSSL::SSL::SSLError => e
+        rescue SocketError, Net::OpenTimeout, Net::ReadTimeout, IOError, OpenSSL::SSL::SSLError,
+               Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EPIPE, Errno::ETIMEDOUT => e
           consecutive_errors += 1
           if consecutive_errors >= MAX_CONSECUTIVE_TRANSIENT_ERRORS
             raise ApiError.new("Gave up after #{consecutive_errors} consecutive network errors: #{e.message}")
@@ -313,6 +371,8 @@ module Fastlane
         parsed = JSON.parse(body)
         return parsed if parsed.is_a?(Hash)
         raise ApiError.new("Expected JSON object from API, got #{parsed.class}: #{body[0, 200]}")
+      rescue JSON::ParserError
+        raise ApiError.new("Invalid JSON response from API")
       end
 
       def extract_error_message(response)

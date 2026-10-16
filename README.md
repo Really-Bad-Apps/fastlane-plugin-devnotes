@@ -1,5 +1,8 @@
 # fastlane-plugin-devnotes
 
+Version 0.8.2 adds polling for asynchronous format and translation jobs (HTTP 202),
+while preserving immediate cached responses (HTTP 200). Applies to both actions.
+
 [![Gem Version](https://img.shields.io/gem/v/fastlane-plugin-devnotes.svg)](https://rubygems.org/gems/fastlane-plugin-devnotes)
 
 Fastlane plugin that fetches an AI-generated release-notes format from the [DevNotes](https://api.devnotes.ai) API during an Android build and writes it into the source tree so it ships as a bundled resource inside the APK. Defaults to the `mobile-html` format (the standard Android "What's New" HTML); pick another via `format_slug:` if your project defines additional formats (X posts, WordPress, Play Store, …) in the DevNotes web UI.
@@ -135,7 +138,7 @@ Submits a release-notes generation job, polls until it completes, then lazily fe
 | `from_tag`       | `DEVNOTES_FROM_TAG`       | no                   | auto-detected from production store       | Git tag to diff from. Leave unset to let DevNotes resolve. |
 | `output_path`    | `DEVNOTES_OUTPUT_PATH`    | no                   | `app/src/main/res/raw/rnotes.txt`         | Relative paths resolve against the **project root** (parent of `fastlane/`). Absolute paths are honoured as-is. |
 | `poll_interval`  | `DEVNOTES_POLL_INTERVAL`  | no                   | `10`                                      | Seconds between job-status polls. Must be > 0. |
-| `timeout`        | `DEVNOTES_TIMEOUT`        | no                   | `600`                                     | Total seconds to wait for generation. Must be > 0. |
+| `timeout`        | `DEVNOTES_TIMEOUT`        | no                   | `600`                                     | Seconds allowed for release generation and, separately, each format/locale fetch. Must be > 0. |
 
 **Returns:** absolute path of the file that was written.
 
@@ -162,7 +165,7 @@ Fetches a per-locale DevNotes format (e.g. `play-store-changelog` with `max_char
 | `strict`            | `DEVNOTES_PLAY_STRICT`             | no       | `false`                             | When `true`, an unmapped bare-language qualifier hard-fails the build instead of skipping with a warning. Genuine non-locale qualifiers (`values-night`, `values-v21`, `values-mdpi`, `values-w720dp`) still skip regardless. **Recommended for production**: a language you ship should never vanish from a release just because someone added a new `values-<lang>/` dir the plugin doesn't know about. |
 | `locale_overrides`  | `DEVNOTES_PLAY_LOCALE_OVERRIDES`   | no       | `{}`                                | BCP 47 → Play Store metadata code rewrites (e.g. `{ "es-419" => "es-MX" }` to override the default Spanish collapse). Applied AFTER `qualifier_to_bcp47`. **This CANNOT rescue an ambiguous bare-language** (`values-pt`, `values-zh`, `values-es`) — that path raises inside `qualifier_to_bcp47` before `locale_overrides` is consulted. Use `qualifier_overrides:` for that case. |
 | `poll_interval`     | `DEVNOTES_POLL_INTERVAL`           | no       | `10`                                | Seconds between job-status polls. |
-| `timeout`           | `DEVNOTES_TIMEOUT`                 | no       | `600`                               | Total seconds to wait for generation. |
+| `timeout`           | `DEVNOTES_TIMEOUT`                 | no       | `600`                               | Seconds allowed for release generation and, separately, each format/locale fetch. |
 
 **Returns:** Hash — `{ locales: [...], paths: [...], skipped: [...] }`. Also stored in lane context as `SharedValues::DEVNOTES_PLAY_CHANGELOG_PATHS`.
 
@@ -336,7 +339,8 @@ The **⚠️ silent-skip rows are the ones most likely to escape review** and sh
 2. Submits a generation job.
 3. Polls the job status every `poll_interval` seconds, up to `timeout`, on a single keep-alive HTTP connection.
 4. On completion, calls `GET /api/projects/<owner>/<slug>/releases/<release_id>/formats/<format_slug>` to lazy-fetch the chosen format's output (cache-hit usually returns in milliseconds).
-5. Writes `content` to `output_path` as UTF-8 bytes (creates parent directories as needed).
+5. For HTTP 202, polls `/api/format-jobs/<job_id>` until completion and reads its `result`. HTTP 200 cached outputs are used immediately. Each format/locale fetch has its own `timeout` budget, including HTTP requests and transient retries. Terminal job failures are reported immediately without resubmitting generation.
+6. Writes `content` to `output_path` as UTF-8 bytes (creates parent directories as needed).
 
 ### Caching
 
